@@ -25,6 +25,16 @@ on:
         required: false
         type: string
         default: ""
+      image_label:
+        description: |
+          Image scaleSetLabel to select for runs-on (image_spyre_inference |
+          image_spyre_inference_pr_<KEY>). The per-PR ephemeral flow passes that
+          PR's set label (e.g. image_spyre_inference_pr_flex_8ddcf3e155e9) so jobs
+          land on the per-PR image (the RPM is baked in -> no runtime sudo).
+          Default keeps push/PR/merge_group runs on the standing set.
+        required: false
+        type: string
+        default: image_spyre_inference
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -45,27 +55,15 @@ jobs:
       matrix:
         include:
           - cfg: Non-distributed spyre tests
-            runs_on:
-              - x86_64
-              - spyre_pf_x1__pvc_1tb_x1
-              - linux
-              - image_spyre_inference
+            spyre: spyre_pf_x1__pvc_1tb_x1
             flags: >-
               -m "not (distributed or upstream)"
           - cfg: Distributed spyre tests
-            runs_on:
-              - x86_64
-              - spyre_pf_x2__pvc_1tb_x1
-              - linux
-              - image_spyre_inference
+            spyre: spyre_pf_x2__pvc_1tb_x1
             flags: >-
               -m distributed
           - cfg: Upstream vLLM tests
-            runs_on:
-              - x86_64
-              - spyre_pf_x1__pvc_1tb_x1
-              - linux
-              - image_spyre_inference
+            spyre: spyre_pf_x1__pvc_1tb_x1
             flags: >-
               -m "upstream and not distributed"
           - cfg: Upstream distributed vLLM tests
@@ -76,7 +74,13 @@ jobs:
               - image_spyre_inference
             flags: >-
               -m "upstream and distributed"
-    runs-on: ${{ matrix.runs_on }}
+    # Compose the runner labels from the per-cfg card token (matrix.spyre) and the
+    # image label. image_label defaults to image_spyre_inference (push/PR/merge_group
+    # land on the standing set); the per-PR ephemeral flow passes
+    # image_spyre_inference_pr_<KEY> via workflow_dispatch so jobs land on the per-PR
+    # runner (baked RPM, no runtime sudo). Composed via fromJSON because runs-on
+    # can't append a scalar to a matrix array inline.
+    runs-on: ${{ fromJSON(format('["x86_64","{0}","linux","{1}"]', matrix.spyre, inputs.image_label || 'image_spyre_inference')) }}
     timeout-minutes: 720
     env:
       # The CI env var is very important.
