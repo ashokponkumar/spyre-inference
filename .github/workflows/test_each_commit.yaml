@@ -25,16 +25,42 @@ on:
         required: false
         type: string
         default: ""
-      image_label:
-        description: |
-          Image scaleSetLabel to select for runs-on (image_spyre_inference |
-          image_spyre_inference_pr_<KEY>). The per-PR ephemeral flow passes that
-          PR's set label (e.g. image_spyre_inference_pr_flex_8ddcf3e155e9) so jobs
-          land on the per-PR image (the RPM is baked in -> no runtime sudo).
-          Default keeps push/PR/merge_group runs on the standing set.
+      ref:
+        description: Branch, tag, or SHA of spyre-inference to check out and test
         required: false
         type: string
-        default: image_spyre_inference
+        default: ""
+      repository:
+        description: |
+          Full clone URL/owner-name of the spyre-inference fork to check out
+          (e.g. "myuser/spyre-inference"); leave empty for the base repo. Used by
+          the cross-repo Test-With: flow to test a companion fork/branch.
+        required: false
+        type: string
+        default: ""
+      pr_url_hash:
+        description: |
+          Hash of the full URL of the PR that triggered this run.
+          Sent by the internal integration pipeline; unused on push/PR/merge_group.
+        required: false
+        type: string
+        default: ""
+      build_torch_spyre:
+        description: Accepted for dispatch-contract parity with torch-spyre; unused here.
+        required: false
+        type: boolean
+        default: true
+      runner_label:
+        description: |
+          Per-PR ephemeral runner-set IMAGE label to select for runs-on
+          (image_spyre_inference_pr_<component>_<sha12>, e.g.
+          image_spyre_inference_pr_flex_8ddcf3e155e9). The per-PR ephemeral flow
+          passes that PR's set label so jobs land on the per-PR image (the changed
+          RPM is baked in -> no runtime sudo). Empty keeps push/PR/merge_group runs
+          on the standing image_spyre_inference set (today's behaviour).
+        required: false
+        type: string
+        default: ""
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -75,12 +101,12 @@ jobs:
             flags: >-
               -m "upstream and distributed"
     # Compose the runner labels from the per-cfg card token (matrix.spyre) and the
-    # image label. image_label defaults to image_spyre_inference (push/PR/merge_group
+    # image label. runner_label defaults to image_spyre_inference (push/PR/merge_group
     # land on the standing set); the per-PR ephemeral flow passes
     # image_spyre_inference_pr_<KEY> via workflow_dispatch so jobs land on the per-PR
     # runner (baked RPM, no runtime sudo). Composed via fromJSON because runs-on
     # can't append a scalar to a matrix array inline.
-    runs-on: ${{ fromJSON(format('["x86_64","{0}","linux","{1}"]', matrix.spyre, inputs.image_label || 'image_spyre_inference')) }}
+    runs-on: ${{ fromJSON(format('["x86_64","{0}","linux","{1}"]', matrix.spyre, inputs.runner_label || 'image_spyre_inference')) }}
     timeout-minutes: 720
     env:
       # The CI env var is very important.
@@ -94,6 +120,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          # Cross-repo Test-With: companion fork/branch (empty = base repo / dispatched ref).
+          repository: ${{ inputs.repository || github.repository }}
+          ref: ${{ inputs.ref || github.ref }}
 
       - name: Compute Spyre image hash
         id: spyre-uv-cache
