@@ -81,15 +81,27 @@ jobs:
       matrix:
         include:
           - cfg: Non-distributed spyre tests
-            spyre: spyre_pf_x1__pvc_1tb_x1
+            runs_on:
+              - x86_64
+              - spyre_pf_x1__pvc_1tb_x1
+              - linux
+            image_label: image_spyre_inference
             flags: >-
               -m "not (distributed or upstream)"
           - cfg: Distributed spyre tests
-            spyre: spyre_pf_x2__pvc_1tb_x1
+            runs_on:
+              - x86_64
+              - spyre_pf_x2__pvc_1tb_x1
+              - linux
+            image_label: image_spyre_inference
             flags: >-
               -m distributed
           - cfg: Upstream vLLM tests
-            spyre: spyre_pf_x1__pvc_1tb_x1
+            runs_on:
+              - x86_64
+              - spyre_pf_x1__pvc_1tb_x1
+              - linux
+            image_label: image_spyre_inference
             flags: >-
               -m "upstream and not distributed"
           - cfg: Upstream distributed vLLM tests
@@ -97,16 +109,13 @@ jobs:
               - x86_64
               - spyre_pf_x2__pvc_1tb_x1
               - linux
-              - image_spyre_inference
+            image_label: image_spyre_inference
             flags: >-
               -m "upstream and distributed"
-    # Compose the runner labels from the per-cfg card token (matrix.spyre) and the
-    # image label. runner_label defaults to image_spyre_inference (push/PR/merge_group
-    # land on the standing set); the per-PR ephemeral flow passes
-    # image_spyre_inference_pr_<KEY> via workflow_dispatch so jobs land on the per-PR
-    # runner (baked RPM, no runtime sudo). Composed via fromJSON because runs-on
-    # can't append a scalar to a matrix array inline.
-    runs-on: ${{ fromJSON(format('["x86_64","{0}","linux","{1}"]', matrix.spyre, inputs.runner_label || 'image_spyre_inference')) }}
+    # Compose runner labels from matrix.runs_on and the image label.
+    # When inputs.runner_label is set (per-PR dispatch flow), it replaces
+    # the standing image label with the per-PR image label.
+    runs-on: ${{ fromJSON(format('["{0}","{1}"]', join(matrix.runs_on, '","'), inputs.runner_label || matrix.image_label)) }}
     timeout-minutes: 720
     env:
       # The CI env var is very important.
