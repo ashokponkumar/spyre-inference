@@ -253,6 +253,12 @@ jobs:
           uv pip show torch
           uv pip freeze
 
+      - name: Ensure public HF models cached
+        if: ${{ steps.changed-src-files.outputs.any_changed == 'true' || inputs.torch_spyre_ref != '' }}
+        env:
+          HF_HUB_OFFLINE: '0'
+        run: uv run .github/cache_config/manage_cache.py --public
+
       - name: Run tests
         if: ${{ steps.changed-src-files.outputs.any_changed == 'true' || inputs.torch_spyre_ref != '' }}
         run: |
