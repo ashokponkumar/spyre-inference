@@ -239,12 +239,7 @@ def test_num_gpu_blocks_override_homogeneous():
 
 
 def test_num_gpu_blocks_override_skipped_for_hybrid():
-    """Hybrid models leave num_gpu_blocks_override unset so vLLM sizes the cache.
-
-    The single-group formula under-allocates for multi-group KV caches; the
-    real requirement depends on vLLM's internal group packing, which isn't
-    known at this stage. So we must NOT pin a block count for hybrid models.
-    """
+    """Hybrid models leave num_gpu_blocks_override unset so vLLM sizes the cache."""
     from spyre_inference.platform import TorchSpyrePlatform
 
     model_config = ModelConfig(
@@ -253,8 +248,7 @@ def test_num_gpu_blocks_override_skipped_for_hybrid():
         dtype=torch.float16,
         trust_remote_code=True,
     )
-    # Simulate a hybrid model by injecting interleaved layer_types onto the
-    # HF config, mirroring Gemma-2/3's sliding/full split (2 distinct types).
+    # Simulate a hybrid model with two interleaved attention types.
     interleaved = ["sliding_attention", "full_attention"] * 13
     model_config.hf_config.layer_types = interleaved
     model_config.hf_text_config.layer_types = interleaved

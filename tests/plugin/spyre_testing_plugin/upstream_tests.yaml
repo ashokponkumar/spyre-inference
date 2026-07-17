@@ -107,11 +107,9 @@ tests:
               dtype: [torch.float16]
               max_tokens: [2] # one prefill and one decode
 
-    # gemma-3-1b-it is hybrid (interleaved sliding/full attention -> multiple
-    # vLLM v1 KV cache groups). test_dummy_loader exercises engine startup +
-    # KV cache init (where the hybrid block-override bug lived) with dummy
-    # weights, so it isolates the fix without depending on gemma-3 generation
-    # quality. Injected via override since it isn't in the upstream MODELS list.
+    # gemma-3-1b-it is hybrid; test_dummy_loader exercises engine startup + KV
+    # cache init (the hybrid block-override path) with dummy weights, isolating
+    # it from gemma-3 generation quality. Injected via override (not in MODELS).
     - rel_path: tests/models/language/generation/test_gemma.py
       allow_list:
         - test: "test_dummy_loader"

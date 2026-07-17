@@ -260,21 +260,12 @@ class TorchSpyrePlatform(CpuPlatform):
         # call CpuPlatform.check_and_update_config()
         super().check_and_update_config(vllm_config)
 
-        # Pin the on-device KV cache to exactly what's needed to fill the
-        # configured batch area: max_num_seqs sequences × ceil(max_model_len /
-        # block_size) blocks each. Anything more is over-allocation while
-        # the attention op is still unoptimized.
-        #
-        # This single-group formula is only valid for homogeneous models. A
-        # hybrid model (e.g. Gemma-2/3's interleaved sliding/full attention)
-        # builds several vLLM v1 KV cache groups; the block count vLLM needs is
-        # `group_size × Σ_groups(blocks_per_group)`, where the group count and
-        # shared-tensor padding come from vLLM's internal layer-grouping and are
-        # not derivable here — the KV cache specs don't exist until after model
-        # load and profiling. Pinning the single-group count under-allocates and
-        # trips `_check_enough_kv_cache_memory`. For hybrid models we skip the
-        # cap and let vLLM size the cache from the profiled memory budget
-        # (VLLM_CPU_KVCACHE_SPACE, above), which is correct by construction.
+        # Pin the on-device KV cache to what's needed to fill the batch area:
+        # max_num_seqs × ceil(max_model_len / block_size) blocks. This
+        # single-group formula only holds for homogeneous models; hybrid models
+        # build several KV cache groups whose block count depends on vLLM's
+        # internal layer-grouping (not knowable here), so we skip the cap and
+        # let vLLM size the cache from the profiled memory budget instead.
         cache_config = vllm_config.cache_config
         if cache_config.num_gpu_blocks_override is None:
             if cls._is_hybrid_attention(vllm_config):
@@ -298,10 +289,8 @@ class TorchSpyrePlatform(CpuPlatform):
     def _is_hybrid_attention(vllm_config: VllmConfig) -> bool:
         """Whether the model interleaves multiple attention types.
 
-        HF exposes the per-layer attention type as `layer_types` (the field
-        vLLM keys its KV cache grouping on). More than one distinct value means
-        vLLM v1 builds multiple KV cache groups (a hybrid model). Models without
-        `layer_types`, or with a single type, are homogeneous.
+        More than one distinct HF `layer_types` value means vLLM builds
+        multiple KV cache groups (a hybrid model).
         """
         model_config = vllm_config.model_config
         hf_config = getattr(model_config, "hf_text_config", model_config.hf_config)
