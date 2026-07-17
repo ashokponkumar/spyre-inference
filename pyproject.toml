@@ -81,9 +81,6 @@ override-dependencies = [
     # The range here should match the numba dependency
     "numpy>=1.24,<2.3",
 
-    # vllm 0.24 requires opencv-python-headless>=4.13; 4.13.0.90 has a packaging bug that incorrectly
-    # depends on libxcb.so.1 (import failure on headless Linux), so pin the next patch, 4.13.0.92.
-    "opencv-python-headless==4.13.0.92",
 
     # setuptools is specified as a runtime dep by vllm, make sure it's patched for CVEs
     "setuptools>=82",
