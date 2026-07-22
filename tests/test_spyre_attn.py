@@ -724,16 +724,7 @@ def test_spyre_attn_mha(
     configure_compilation: str,
     configure_device: str,
 ) -> None:
-    """MHA correctness: num_query_heads == num_kv_heads.
-
-    Historically MHA failed on Spyre with a layout-propagation error in
-    propagate_layouts.py ("cannot restickify any input layout of y to carry
-    y_var=d2") when transposing the degenerate GQA dimension. The code still
-    contains a TODO about that failure mode, but the actual restriction was
-    lifted in torch-spyre before this test was added. We deliberately do NOT
-    mark this as xfail: doing so would hide the fact that MHA now works, and
-    the CPU baseline remains valuable as a correctness reference.
-    """
+    """MHA correctness: num_query_heads == num_kv_heads."""
     _run_spyre_attn_test(
         seq_lens=seq_lens,
         block_size=128,
