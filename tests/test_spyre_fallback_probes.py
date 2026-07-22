@@ -93,9 +93,8 @@ def test_spyre_lm_head_unpadded_matmul_and_slice(spyre_device):
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "Spyre lacks a native index_select/embedding kernel. "
-        "aten.embedding is a registered CPU fallback. This blocks on-device "
-        "RoPE cos/sin gather and VocabParallelEmbedding."
+        "Spyre lacks a native index_select kernel. "
+        "This blocks on-device RoPE cos/sin gather."
     ),
 )
 def test_spyre_index_select_for_rope(spyre_device):
