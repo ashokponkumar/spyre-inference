@@ -31,6 +31,8 @@ import torch
 
 from torch_spyre._inductor.constants import FP8_E4M3_MAX
 
+from spyre_testing_plugin.pytest_plugin import spyre_available
+
 
 def cpu_quantize_fp8(x: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
     """CPU reference for FP8 quantization: `clamp(x / scale).to(float8_e4m3fn)`."""
@@ -72,19 +74,10 @@ def test_quantize_applies_scale_before_clamp():
     torch.testing.assert_close(x_fp8_fp16, expected, atol=0.0, rtol=0.0)
 
 
-def _spyre_available() -> bool:
-    """Whether a Spyre device is usable in this process."""
-    try:
-        torch.randn(1, device=torch.device("spyre"))
-        return True
-    except Exception:
-        return False
-
-
 @pytest.mark.fp8
 def test_spyre_fp8_roundtrip_smoke():
     """FP8 quantize->dequantize runs end-to-end on Spyre with no silent fallback."""
-    if not _spyre_available():
+    if not spyre_available():
         pytest.skip("Spyre device not available")
 
     from torch_spyre.ops.fallbacks import FallbackWarning
