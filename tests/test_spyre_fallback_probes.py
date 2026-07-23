@@ -159,24 +159,9 @@ def test_spyre_index_select_for_rope(spyre_device):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Eager narrow().copy_() into a Spyre tensor writes row 0 instead of "
-        "the target row (silent wrong values). Blocks replacing the on-device "
-        "torch.ops.spyre.overwrite write with a plain eager narrow().copy_()."
-    ),
-)
-def test_spyre_eager_narrow_copy_at_offset(spyre_device):
-    """Eager row write at a constant offset lands at row 0 instead of the target."""
-    page = torch.zeros(2, 256, 64, dtype=torch.float16, device=spyre_device)
-    tok = torch.randn(2, 1, 64, dtype=torch.float16, device=spyre_device)
-
-    page.narrow(1, 37, 1).copy_(tok)
-
-    expected = torch.zeros(2, 256, 64, dtype=torch.float16)
-    expected[:, 37, :] = tok.cpu()[:, 0, :]
-    torch.testing.assert_close(page.cpu(), expected, atol=0, rtol=0)
+# Note: eager narrow().copy_() at a constant offset started working in a recent
+# torch-spyre dependency bump, so it is no longer xfail here. A follow-up PR
+# can remove the torch.ops.spyre.overwrite workaround in the attention backend.
 
 
 @pytest.mark.xfail(
