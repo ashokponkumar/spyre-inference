@@ -309,7 +309,7 @@ jobs:
         # exact same commands.
         run: |
           echo "Running tests for config: ${{ matrix.cfg }}..."
-          make test MARK_OVERRIDE="${{ matrix.mark_override }}" JUNIT_XML=junit-${{ strategy.job-index }}.xml
+          make run-one MARK_OVERRIDE="${{ matrix.mark_override }}" JUNIT_XML=junit-${{ strategy.job-index }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
