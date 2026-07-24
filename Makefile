@@ -15,8 +15,24 @@ TEST_TYPE ?= full
 # reproduces CI verbosity; override e.g. `make test PYTEST_ARGS="-x -q"`.
 PYTEST_ARGS ?= -s -vvv
 
+# When set, write JUnit XML here (both CI callers -- GHA's _test_matrix.yaml
+# and spyre-frameworks' Jenkinsfile.product-test -- set this to collect
+# results for artifact upload / ClickHouse ingestion). Unset = no JUnit file.
+JUNIT_XML ?=
+ifneq ($(JUNIT_XML),)
+JUNIT_ARGS := --junitxml=$(JUNIT_XML)
+else
+JUNIT_ARGS :=
+endif
+
 # Map TEST_TYPE to a pytest -m marker expression. full -> no filter (all tests).
-ifeq ($(TEST_TYPE),full)
+# MARK_OVERRIDE bypasses TEST_TYPE entirely for callers that need a marker
+# expression finer than the 3 coarse tiers (e.g. CI splitting the "full"-only
+# upstream suites into separate parallel jobs) -- set MARK_OVERRIDE and the
+# TEST_TYPE mapping below is skipped.
+ifneq ($(MARK_OVERRIDE),)
+MARK_EXPR := -m "$(MARK_OVERRIDE)"
+else ifeq ($(TEST_TYPE),full)
 MARK_EXPR :=
 else ifeq ($(TEST_TYPE),smoke)
 MARK_EXPR := -m "not (distributed or upstream or attention)"
@@ -31,7 +47,7 @@ endif
 help: ## Show this help message
 	@awk 'BEGIN {FS = ":.*?## "} /^[0-9a-zA-Z_-]+:.*?## / {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 	@echo ""
-	@echo "Variables: TEST_TYPE=smoke|core|full (default full), PYTEST_ARGS (default '$(PYTEST_ARGS)')"
+	@echo "Variables: TEST_TYPE=smoke|core|full (default full), MARK_OVERRIDE (raw -m expr, bypasses TEST_TYPE), PYTEST_ARGS (default '$(PYTEST_ARGS)'), JUNIT_XML (path to write JUnit results, unset = no JUnit file)"
 
 test: ## Run tests. Narrow scope with TEST_TYPE=smoke|core|full (default full).
 	# Port of the CI "Run tests" env setup: ibm-aiu-setup.sh ends with a chmod of
@@ -45,6 +61,6 @@ test: ## Run tests. Narrow scope with TEST_TYPE=smoke|core|full (default full).
 	source /etc/profile.d/ibm-aiu-setup.sh
 	set -e
 	echo "Running tests for TEST_TYPE=$(TEST_TYPE)..."
-	uv run pytest $(PYTEST_ARGS) $(MARK_EXPR)
+	uv run pytest $(PYTEST_ARGS) $(MARK_EXPR) $(JUNIT_ARGS)
 
 tests: test  ## Alias for `test`.
