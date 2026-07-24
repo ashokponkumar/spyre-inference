@@ -45,7 +45,7 @@ endif
 RESULTS_DIR ?= .
 
 .PHONY: help test tests run-one aiu-setup perf-tests \
-        test-not-distributed-upstream-attention test-attention test-distributed \
+        test-smoke test-attention test-distributed \
         test-upstream test-upstream-distributed test-upstream-model
 
 help: ## Show this help message
@@ -60,40 +60,42 @@ help: ## Show this help message
 # targets below by name, so this Makefile is the sole owner of the marker
 # strings. Add/change a combo here only.
 
-# ibm-aiu-setup.sh's one-time host-level side effects (e.g. topo.json reset)
-# only need to happen once per `make test` invocation, even though `test`
-# fans out into 6 separate run-one sub-makes. Gate on a stamp file so repeat
-# sub-makes within the same `make test` skip the reset; the env sourcing
-# itself is cheap and still happens per-shell in run-one/perf-tests since env
-# vars can't persist across separate make/shell processes.
+# The env sourcing itself must happen in every recipe shell (env vars can't
+# persist across separate make/shell processes), but ibm-aiu-setup.sh's
+# one-time host-level side effect (topo.json reset) only needs to happen once
+# per `make test` invocation even though `test` fans out into 6 separate
+# run-one sub-makes -- gated on a stamp file so repeat sub-makes skip it.
+# define (not a target body) so run-one/perf-tests can inline the exact same
+# setup commands via $(AIU_SETUP_CMD) without re-declaring them.
 AIU_SETUP_STAMP := /tmp/.spyre-inference-aiu-setup-done
+define AIU_SETUP_CMD
+if [ ! -f "$(AIU_SETUP_STAMP)" ]; then rm -f /tmp/etc/ibm/spyre/topo.json; touch "$(AIU_SETUP_STAMP)"; fi; \
+unset _IBM_AIU_SETUP; \
+set +e; \
+source "$$HOME/.bashrc"; \
+source /etc/profile.d/ibm-aiu-setup.sh; \
+set -e
+endef
 
-aiu-setup: ## Internal: run ibm-aiu-setup.sh's one-time side effects (memoized via a stamp file for this run).
-	if [ ! -f "$(AIU_SETUP_STAMP)" ]; then \
-	  rm -f /tmp/etc/ibm/spyre/topo.json; \
-	  touch "$(AIU_SETUP_STAMP)"; \
-	fi
+aiu-setup: ## Internal: source ibm-aiu-setup.sh and run its one-time side effects (memoized via a stamp file for this run).
+	$(AIU_SETUP_CMD)
 
-run-one: aiu-setup ## Internal: one pytest invocation for the resolved MARK_EXPR/JUNIT_ARGS.
+run-one: ## Internal: one pytest invocation for the resolved MARK_EXPR/JUNIT_ARGS.
 	# ibm-aiu-setup.sh ends with a chmod of root-owned /tmp/etc that fails on
 	# the Spyre image; env vars are already exported by then, so tolerate
-	# that failure.
-	unset _IBM_AIU_SETUP; \
-	set +e; \
-	source "$$HOME/.bashrc"; \
-	source /etc/profile.d/ibm-aiu-setup.sh; \
-	set -e; \
+	# that failure (handled by AIU_SETUP_CMD's set +e/-e wrap).
+	$(AIU_SETUP_CMD); \
 	echo "Running tests for TEST_TYPE=$(TEST_TYPE) MARK_OVERRIDE=$(MARK_OVERRIDE)..."; \
 	uv run pytest $(PYTEST_ARGS) $(MARK_EXPR) $(JUNIT_ARGS)
 
-test-not-distributed-upstream-attention: ## Run the "smoke" marker combo (non-distributed, non-upstream, non-attention).
+test-smoke: ## Run the smoke marker combo (non-distributed, non-upstream, non-attention).
 	$(MAKE) run-one MARK_OVERRIDE='not (distributed or upstream or attention)' JUNIT_XML=$(JUNIT_XML)
 
 test-attention: ## Run the attention-only marker combo.
 	$(MAKE) run-one MARK_OVERRIDE='attention and not (distributed or upstream)' JUNIT_XML=$(JUNIT_XML)
 
 test-distributed: ## Run the distributed marker combo.
-	$(MAKE) run-one MARK_OVERRIDE='distributed' JUNIT_XML=$(JUNIT_XML)
+	$(MAKE) run-one MARK_OVERRIDE='distributed and not upstream' JUNIT_XML=$(JUNIT_XML)
 
 test-upstream: ## Run the upstream (non-distributed, non-model) marker combo.
 	$(MAKE) run-one MARK_OVERRIDE='upstream and not distributed and not model' JUNIT_XML=$(JUNIT_XML)
@@ -114,7 +116,7 @@ test: ## Run tests. TEST_TYPE=smoke|core|full (default full) or set MARK_OVERRID
 	else \
 	  mkdir -p "$(RESULTS_DIR)"; \
 	  rc=0; \
-	  $(MAKE) test-not-distributed-upstream-attention JUNIT_XML="$(RESULTS_DIR)/not-distributed-upstream-attention.xml" || rc=1; \
+	  $(MAKE) test-smoke JUNIT_XML="$(RESULTS_DIR)/smoke.xml" || rc=1; \
 	  $(MAKE) test-attention JUNIT_XML="$(RESULTS_DIR)/attention.xml" || rc=1; \
 	  $(MAKE) test-distributed JUNIT_XML="$(RESULTS_DIR)/distributed.xml" || rc=1; \
 	  $(MAKE) test-upstream JUNIT_XML="$(RESULTS_DIR)/upstream.xml" || rc=1; \
@@ -125,10 +127,9 @@ test: ## Run tests. TEST_TYPE=smoke|core|full (default full) or set MARK_OVERRID
 
 tests: test  ## Alias for `test`.
 
-perf-tests: aiu-setup ## Run vLLM benchmark suite, writing JSON results under RESULTS_DIR.
+perf-tests: ## Run vLLM benchmark suite, writing JSON results under RESULTS_DIR.
 	mkdir -p "$(RESULTS_DIR)"
-	source "$$HOME/.bashrc"; \
-	source /etc/profile.d/ibm-aiu-setup.sh >/dev/null 2>&1 || true; \
+	$(AIU_SETUP_CMD); \
 	uv run python3 .github/scripts/run_vllm_benchmarks.py \
 		--configs-dir vllm-benchmarks/benchmarks/spyre \
 		--results-dir "$(RESULTS_DIR)"
