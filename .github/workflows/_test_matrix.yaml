@@ -304,9 +304,8 @@ jobs:
       - name: Run tests
         if: ${{ steps.gate.outputs.run == 'true' }}
         # Env setup (aiu-setup sourcing, topo.json cleanup) lives in the
-        # Makefile's `test` target now -- the single entrypoint also used by
-        # spyre-frameworks' Jenkinsfile.product-test, so both callers run the
-        # exact same commands.
+        # Makefile's run-one target now -- the single entrypoint for one
+        # marker-combo invocation.
         run: |
           echo "Running tests for config: ${{ matrix.cfg }}..."
           make run-one MARK_OVERRIDE="${{ matrix.mark_override }}" JUNIT_XML=junit-${{ strategy.job-index }}.xml

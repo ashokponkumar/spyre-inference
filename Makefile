@@ -14,9 +14,8 @@ TEST_TYPE ?= full
 # reproduces CI verbosity; override e.g. `make test PYTEST_ARGS="-x -q"`.
 PYTEST_ARGS ?= -s -vvv
 
-# When set, write JUnit XML here (both CI callers -- GHA's _test_matrix.yaml
-# and spyre-frameworks' Jenkinsfile.product-test -- set this to collect
-# results for artifact upload / ClickHouse ingestion). Unset = no JUnit file.
+# When set, write JUnit XML here (CI callers set this to collect results
+# for artifact upload / result ingestion). Unset = no JUnit file.
 JUNIT_XML ?=
 ifneq ($(JUNIT_XML),)
 JUNIT_ARGS := --junitxml=$(JUNIT_XML)
