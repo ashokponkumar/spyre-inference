@@ -44,7 +44,9 @@ endif
 # one shot (ingest_xml.py globs `${RESULTS_DIR}/*.xml` non-recursively).
 RESULTS_DIR ?= .
 
-.PHONY: help test tests run-one perf-tests
+.PHONY: help test tests run-one aiu-setup perf-tests \
+        test-not-distributed-upstream-attention test-attention test-distributed \
+        test-upstream test-upstream-distributed test-upstream-model
 
 help: ## Show this help message
 	@awk 'BEGIN {FS = ":.*?## "} /^[0-9a-zA-Z_-]+:.*?## / {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -53,19 +55,54 @@ help: ## Show this help message
 	@echo "  PYTEST_ARGS (default '$(PYTEST_ARGS)'), JUNIT_XML (single-run path; unset = no JUnit file),"
 	@echo "  RESULTS_DIR (aggregate 'full' JUnit output dir, default '$(RESULTS_DIR)')"
 
-run-one: ## Internal: one pytest invocation for the resolved MARK_EXPR/JUNIT_ARGS.
-	# Port of the CI "Run tests" env setup: ibm-aiu-setup.sh ends with a chmod of
-	# root-owned /tmp/etc that fails on the Spyre image; env vars are already
-	# exported by then, so tolerate that failure. rm -f so local re-runs don't
-	# fail when topo.json is absent.
+# Marker set for GHA's _test_matrix.yaml is intentionally NOT duplicated in
+# YAML: each matrix.cfg's "Run tests" step calls one of the test-<name>
+# targets below by name, so this Makefile is the sole owner of the marker
+# strings. Add/change a combo here only.
+
+# ibm-aiu-setup.sh's one-time host-level side effects (e.g. topo.json reset)
+# only need to happen once per `make test` invocation, even though `test`
+# fans out into 6 separate run-one sub-makes. Gate on a stamp file so repeat
+# sub-makes within the same `make test` skip the reset; the env sourcing
+# itself is cheap and still happens per-shell in run-one/perf-tests since env
+# vars can't persist across separate make/shell processes.
+AIU_SETUP_STAMP := /tmp/.spyre-inference-aiu-setup-done
+
+aiu-setup: ## Internal: run ibm-aiu-setup.sh's one-time side effects (memoized via a stamp file for this run).
+	if [ ! -f "$(AIU_SETUP_STAMP)" ]; then \
+	  rm -f /tmp/etc/ibm/spyre/topo.json; \
+	  touch "$(AIU_SETUP_STAMP)"; \
+	fi
+
+run-one: aiu-setup ## Internal: one pytest invocation for the resolved MARK_EXPR/JUNIT_ARGS.
+	# ibm-aiu-setup.sh ends with a chmod of root-owned /tmp/etc that fails on
+	# the Spyre image; env vars are already exported by then, so tolerate
+	# that failure.
 	unset _IBM_AIU_SETUP; \
-	rm -f /tmp/etc/ibm/spyre/topo.json; \
 	set +e; \
 	source "$$HOME/.bashrc"; \
 	source /etc/profile.d/ibm-aiu-setup.sh; \
 	set -e; \
 	echo "Running tests for TEST_TYPE=$(TEST_TYPE) MARK_OVERRIDE=$(MARK_OVERRIDE)..."; \
 	uv run pytest $(PYTEST_ARGS) $(MARK_EXPR) $(JUNIT_ARGS)
+
+test-not-distributed-upstream-attention: ## Run the "smoke" marker combo (non-distributed, non-upstream, non-attention).
+	$(MAKE) run-one MARK_OVERRIDE='not (distributed or upstream or attention)' JUNIT_XML=$(JUNIT_XML)
+
+test-attention: ## Run the attention-only marker combo.
+	$(MAKE) run-one MARK_OVERRIDE='attention and not (distributed or upstream)' JUNIT_XML=$(JUNIT_XML)
+
+test-distributed: ## Run the distributed marker combo.
+	$(MAKE) run-one MARK_OVERRIDE='distributed' JUNIT_XML=$(JUNIT_XML)
+
+test-upstream: ## Run the upstream (non-distributed, non-model) marker combo.
+	$(MAKE) run-one MARK_OVERRIDE='upstream and not distributed and not model' JUNIT_XML=$(JUNIT_XML)
+
+test-upstream-distributed: ## Run the upstream+distributed marker combo.
+	$(MAKE) run-one MARK_OVERRIDE='upstream and distributed' JUNIT_XML=$(JUNIT_XML)
+
+test-upstream-model: ## Run the upstream+model (non-distributed) marker combo.
+	$(MAKE) run-one MARK_OVERRIDE='upstream and model and not distributed' JUNIT_XML=$(JUNIT_XML)
 
 # When MARK_OVERRIDE is unset and TEST_TYPE=full, GHA's _test_matrix.yaml runs
 # this as 6 separate marker-combo jobs, not one unfiltered run -- mirror that
@@ -77,19 +114,21 @@ test: ## Run tests. TEST_TYPE=smoke|core|full (default full) or set MARK_OVERRID
 	else \
 	  mkdir -p "$(RESULTS_DIR)"; \
 	  rc=0; \
-	  $(MAKE) run-one MARK_OVERRIDE='not (distributed or upstream or attention)' JUNIT_XML="$(RESULTS_DIR)/not-distributed-upstream-attention.xml" || rc=1; \
-	  $(MAKE) run-one MARK_OVERRIDE='attention and not (distributed or upstream)' JUNIT_XML="$(RESULTS_DIR)/attention.xml" || rc=1; \
-	  $(MAKE) run-one MARK_OVERRIDE='distributed' JUNIT_XML="$(RESULTS_DIR)/distributed.xml" || rc=1; \
-	  $(MAKE) run-one MARK_OVERRIDE='upstream and not distributed and not model' JUNIT_XML="$(RESULTS_DIR)/upstream.xml" || rc=1; \
-	  $(MAKE) run-one MARK_OVERRIDE='upstream and distributed' JUNIT_XML="$(RESULTS_DIR)/upstream-distributed.xml" || rc=1; \
-	  $(MAKE) run-one MARK_OVERRIDE='upstream and model and not distributed' JUNIT_XML="$(RESULTS_DIR)/upstream-model.xml" || rc=1; \
+	  $(MAKE) test-not-distributed-upstream-attention JUNIT_XML="$(RESULTS_DIR)/not-distributed-upstream-attention.xml" || rc=1; \
+	  $(MAKE) test-attention JUNIT_XML="$(RESULTS_DIR)/attention.xml" || rc=1; \
+	  $(MAKE) test-distributed JUNIT_XML="$(RESULTS_DIR)/distributed.xml" || rc=1; \
+	  $(MAKE) test-upstream JUNIT_XML="$(RESULTS_DIR)/upstream.xml" || rc=1; \
+	  $(MAKE) test-upstream-distributed JUNIT_XML="$(RESULTS_DIR)/upstream-distributed.xml" || rc=1; \
+	  $(MAKE) test-upstream-model JUNIT_XML="$(RESULTS_DIR)/upstream-model.xml" || rc=1; \
 	  exit $$rc; \
 	fi
 
 tests: test  ## Alias for `test`.
 
-perf-tests: ## Run vLLM benchmark suite, writing JSON results under RESULTS_DIR.
+perf-tests: aiu-setup ## Run vLLM benchmark suite, writing JSON results under RESULTS_DIR.
 	mkdir -p "$(RESULTS_DIR)"
+	source "$$HOME/.bashrc"; \
+	source /etc/profile.d/ibm-aiu-setup.sh >/dev/null 2>&1 || true; \
 	uv run python3 .github/scripts/run_vllm_benchmarks.py \
 		--configs-dir vllm-benchmarks/benchmarks/spyre \
 		--results-dir "$(RESULTS_DIR)"

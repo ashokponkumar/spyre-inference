@@ -105,8 +105,8 @@ jobs:
               - linux
             # image_label: image_torch_spyre
             image_label: image_torch_spyre_pinned
-            mark_override: >-
-              not (distributed or upstream or attention)
+            # Marker expression owned by the Makefile (test-<name> target); see that target's comment.
+            test_target: test-not-distributed-upstream-attention
           - cfg: Spyre attention tests
             test_types: core full
             runs_on:
@@ -115,8 +115,7 @@ jobs:
               - linux
             # image_label: image_torch_spyre
             image_label: image_torch_spyre_pinned
-            mark_override: >-
-              attention and not (distributed or upstream)
+            test_target: test-attention
           - cfg: Distributed spyre tests
             test_types: core full
             runs_on:
@@ -125,7 +124,7 @@ jobs:
               - linux
             # image_label: image_torch_spyre
             image_label: image_torch_spyre_pinned
-            mark_override: distributed
+            test_target: test-distributed
           - cfg: Upstream vLLM tests
             # Upstream-vLLM suites are excluded from smoke/core (heavy).
             test_types: full
@@ -135,8 +134,7 @@ jobs:
               - linux
             # image_label: image_torch_spyre
             image_label: image_torch_spyre_pinned
-            mark_override: >-
-              upstream and not distributed and not model
+            test_target: test-upstream
           - cfg: Upstream distributed vLLM tests
             test_types: full
             runs_on:
@@ -145,7 +143,7 @@ jobs:
               - linux
             # image_label: image_torch_spyre
             image_label: image_torch_spyre_pinned
-            mark_override: upstream and distributed
+            test_target: test-upstream-distributed
           - cfg: Upstream model vLLM tests
             test_types: full
             runs_on:
@@ -154,8 +152,7 @@ jobs:
               - linux
             # image_label: image_torch_spyre
             image_label: image_torch_spyre_pinned
-            mark_override: >-
-              upstream and model and not distributed
+            test_target: test-upstream-model
     # Compose runner labels from matrix.runs_on and the image label.
     # When inputs.runner_label is set (per-PR dispatch flow), it replaces
     # the standing image label with the per-PR image label.
@@ -303,12 +300,13 @@ jobs:
 
       - name: Run tests
         if: ${{ steps.gate.outputs.run == 'true' }}
-        # Env setup (aiu-setup sourcing, topo.json cleanup) lives in the
-        # Makefile's run-one target now -- the single entrypoint for one
-        # marker-combo invocation.
+        # Env setup (aiu-setup sourcing, topo.json cleanup) and the marker
+        # expression for this config both live in the Makefile's
+        # test_target now -- the single entrypoint/owner for one
+        # marker-combo invocation, so the marker set is not duplicated here.
         run: |
           echo "Running tests for config: ${{ matrix.cfg }}..."
-          make run-one MARK_OVERRIDE="${{ matrix.mark_override }}" JUNIT_XML=junit-${{ strategy.job-index }}.xml
+          make ${{ matrix.test_target }} JUNIT_XML=junit-${{ strategy.job-index }}.xml
           echo "tests done"
 
       - name: Upload JUnit results
@@ -318,3 +316,12 @@ jobs:
           name: junit-${{ strategy.job-index }}
           path: junit-${{ strategy.job-index }}.xml
           retention-days: 14
+
+      - name: Publish JUnit test report
+        if: ${{ always() && steps.gate.outputs.run == 'true' }}
+        uses: dorny/test-reporter@v1
+        with:
+          name: 'Test report (${{ matrix.cfg }})'
+          path: junit-${{ strategy.job-index }}.xml
+          reporter: java-junit
+          fail-on-error: false
