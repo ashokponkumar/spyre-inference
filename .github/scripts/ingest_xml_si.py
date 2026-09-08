@@ -383,7 +383,7 @@ def v2_canonical_arch(arch) -> str:
     return "x86_64" if a in ("amd64", "x86", "x86-64", "x86_64") else a
 
 
-def v2_run_uid(source: str, external_run_id: str, arch: str, test_type: str) -> str:
+def v2_run_id(source: str, external_run_id: str, arch: str, test_type: str) -> str:
     """Identity of one TEST-EXECUTION LEG: (source, external_run_id, arch, test_type).
 
     arch and test_type are IN the key because the real execution grain measured
@@ -420,7 +420,7 @@ def v2_test_case_id(component: str, classname: str, name: str, tags) -> str:
     therefore group on (component, classname, name), never on test_case_id.
     """
     if not (_v2_norm(component) and _v2_norm(name)):
-        # Same collision hazard as v2_run_uid: an empty field still hashes to a real,
+        # Same collision hazard as v2_run_id: an empty field still hashes to a real,
         # stable uuid that every other such case shares. The v2 table's CONSTRAINTs
         # reject component='' / name='' anyway. classname is legitimately empty for a
         # module-level test, so it is NOT required.
@@ -489,20 +489,20 @@ def v2_tables_present(client) -> bool:
     )
 
 
-def v2_already_ingested(client, run_uid: str, component: str) -> bool:
+def v2_already_ingested(client, run_id: str, component: str) -> bool:
     """test_case_runs is a plain MergeTree with no dedup key, so a double ingest of one
     leg DOUBLES its counts -- and the v2 schema dropped the stored counters precisely
     because they are derived from these rows. This check is what keeps that correct.
-    Scoped by component as well as run_uid to hit the ORDER BY prefix."""
+    Scoped by component as well as run_id to hit the ORDER BY prefix."""
     rows = client.query(
         "SELECT count() FROM test_case_runs "
-        "WHERE component = {component:String} AND run_uid = {run_uid:UUID}",
-        parameters={"component": component, "run_uid": run_uid},
+        "WHERE component = {component:String} AND run_id = {run_id:UUID}",
+        parameters={"component": component, "run_id": run_id},
     ).result_rows
     return bool(rows and rows[0][0] > 0)
 
 
-def insert_v2(client, component: str, run_uid: str, cases: list) -> int:
+def insert_v2(client, component: str, run_id: str, cases: list) -> int:
     """Write test_cases (identity) + test_case_runs (outcome) for one leg.
 
     Dropped from v2 deliberately: filename, suite_name, runner_run_id, and every
@@ -528,7 +528,7 @@ def insert_v2(client, component: str, run_uid: str, cases: list) -> int:
         ident_rows[tcid] = [tcid, component, classname, name, tags]
         run_rows.append(
             [
-                run_uid,
+                run_id,
                 tcid,
                 component,
                 c.get("status", ""),
@@ -545,7 +545,7 @@ def insert_v2(client, component: str, run_uid: str, cases: list) -> int:
         "test_case_runs",
         run_rows,
         column_names=[
-            "run_uid",
+            "run_id",
             "test_case_id",
             "component",
             "status",
@@ -577,7 +577,7 @@ def main():
         "--jenkins-run-key",
         default="",
         help="This leg's own Jenkins externalizable id, e.g. 'Spyre/component-build#417'. "
-        "Hashed into the schema-v2 run_uid, which is how the orchestrator's "
+        "Hashed into the schema-v2 run_id, which is how the orchestrator's "
         "artifact_results row and these per-case rows join without threading a uuid.",
     )
     parser.add_argument(
@@ -684,21 +684,21 @@ def main():
             _v2_source, _v2_ext = v2_source_and_external_run_id(args, run_id)
             _v2_tier = (getattr(args, "trigger_type", "") or "").strip()
             _v2_arch = (args.platform or run.get("platform") or "").strip()
-            _v2_run_uid = v2_run_uid(_v2_source, _v2_ext, _v2_arch, _v2_tier)
-            if not _v2_run_uid:
-                # Loud, because a blank run_uid means these cases reach v2 unjoinable
+            _v2_run_id = v2_run_id(_v2_source, _v2_ext, _v2_arch, _v2_tier)
+            if not _v2_run_id:
+                # Loud, because a blank run_id means these cases reach v2 unjoinable
                 # to any artifact -- and that reads downstream as "no tests ran".
                 print(
-                    f"  [warn] v2 skipped: run_uid not derivable "
+                    f"  [warn] v2 skipped: run_id not derivable "
                     f"(source={_v2_source} ext={_v2_ext!r} arch={_v2_arch!r} "
                     f"tier={_v2_tier!r}); --trigger-type is the field usually missing",
                     file=sys.stderr,
                 )
-            elif v2_already_ingested(client, _v2_run_uid, V2_COMPONENT):
-                print(f"  v2: already ingested run_uid={_v2_run_uid} — skipping")
+            elif v2_already_ingested(client, _v2_run_id, V2_COMPONENT):
+                print(f"  v2: already ingested run_id={_v2_run_id} — skipping")
             else:
-                _n = insert_v2(client, V2_COMPONENT, _v2_run_uid, cases)
-                print(f"  v2: {_n} test_case_runs under run_uid={_v2_run_uid}")
+                _n = insert_v2(client, V2_COMPONENT, _v2_run_id, cases)
+                print(f"  v2: {_n} test_case_runs under run_id={_v2_run_id}")
 
 
         total_cases += len(cases)
