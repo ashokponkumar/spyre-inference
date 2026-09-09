@@ -212,7 +212,10 @@ jobs:
             --sha "${BENCHMARK_SHA}" \
             --run-id "${{ github.run_id }}" \
             --job-id "0" \
-            --pr-number "${PR_NUMBER}"
+            --pr-number "${PR_NUMBER}" \
+            --arch "${BENCHMARK_ARCH:-x86_64}" \
+            --gha-run-id "${{ github.run_id }}" \
+            --test-type perf
 
       - name: Job Summary
         if: always()
