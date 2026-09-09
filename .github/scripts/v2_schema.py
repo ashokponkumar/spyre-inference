@@ -1,3 +1,16 @@
+# Copyright 2026 The Spyre-Inference Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """The v2 ClickHouse schema, as data — one module, byte-identical in all three product repos.
 
 WHY THIS EXISTS. Every v2 insert used to be a positional list paired with a separate
@@ -24,8 +37,9 @@ re-keys the warehouse and silently breaks v2_already_ingested dedup, producing d
 rather than an error.
 """
 
-from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from collections.abc import Sequence
+from dataclasses import dataclass
+from typing import Any
 
 # The DDL's CONSTRAINT chk_status, re-expressed. It cannot be read from the server at ingest
 # time, so it is duplicated here -- keep in step with functional_tests_v2.sql.
@@ -45,13 +59,13 @@ class Table:
     """
 
     name: str
-    columns: Tuple[str, ...]
+    columns: tuple[str, ...]
     # Columns that must be non-empty, mirroring the DDL's CHECK constraints.
-    required: Tuple[str, ...] = ()
+    required: tuple[str, ...] = ()
     # id column for cross-run identity dedup; None for fact tables, which append freely.
-    identity: Optional[str] = None
+    identity: str | None = None
 
-    def row(self, values: Dict[str, Any]) -> List[Any]:
+    def row(self, values: dict[str, Any]) -> list[Any]:
         """Order one row by `columns`. Raises on an unknown or missing column.
 
         The raise is the point: an inserted or renamed column shows up here, at the call
@@ -109,7 +123,7 @@ BENCHMARK_RUNS = Table(
 TABLES = {t.name: t for t in (TEST_CASES, TEST_CASE_RUNS, BENCHMARKS, BENCHMARK_RUNS)}
 
 
-def insert(client, table: Table, rows: Sequence[Dict[str, Any]]) -> int:
+def insert(client, table: Table, rows: Sequence[dict[str, Any]]) -> int:
     """Insert dicts into `table`, ordering every row through the one column list."""
     if not rows:
         return 0
@@ -118,7 +132,7 @@ def insert(client, table: Table, rows: Sequence[Dict[str, Any]]) -> int:
     return len(ordered)
 
 
-def insert_identities(client, table: Table, rows: Dict[Any, Dict[str, Any]]) -> int:
+def insert_identities(client, table: Table, rows: dict[Any, dict[str, Any]]) -> int:
     """Insert only the identity rows the dimension does not already hold.
 
     Both dimensions are plain MergeTree, so re-inserting a known identity APPENDS a duplicate
