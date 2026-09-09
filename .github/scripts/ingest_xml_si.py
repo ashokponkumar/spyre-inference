@@ -32,6 +32,7 @@ Usage (called by the GHA workflow):
 
 import argparse
 import os
+import platform as _platform
 import sys
 import uuid
 from collections import Counter
@@ -177,15 +178,29 @@ def parse_test_xml(xml_path: Path):
 # ---------------------------------------------------------------------------
 
 
-def get_client():
+def get_client(database: str | None = None):
     return clickhouse_connect.get_client(
         host=os.environ["CLICKHOUSE_HOST"],
         port=int(os.environ.get("CLICKHOUSE_PORT", 443)),
         user=os.environ.get("CLICKHOUSE_USER", "default"),
         password=os.environ["CLICKHOUSE_PASS"],
-        database=os.environ.get("CLICKHOUSE_DB", "spyre"),
+        database=database or os.environ.get("CLICKHOUSE_DB", "spyre"),
         secure=True,
     )
+
+
+def get_v2_client():
+    """A SECOND connection, bound to the v2 database, or None when none is configured.
+
+    v2 is a different DATABASE, not different table names: test_cases exists in both
+    generations with incompatible shapes, so one `database=` cannot serve both. Returns None
+    when CLICKHOUSE_DB_V2 is unset, which is what makes --schema v1 (the default) cost
+    nothing -- no second connection is opened.
+    """
+    db = os.environ.get("CLICKHOUSE_DB_V2", "").strip()
+    if not db:
+        return None
+    return get_client(database=db)
 
 
 def insert_run(client, run_id: str, run: dict, args):
@@ -587,15 +602,39 @@ def main():
     )
     parser.add_argument(
         "--platform",
-        default="",
-        help="Hardware platform the suite ran on, e.g. x86_64 | s390x | ppc64le",
+        default=_platform.machine() or "",
+        help="Hardware platform the suite ran on, e.g. x86_64 | s390x | ppc64le. "
+        "Defaults to the ingest host's arch, which is the machine the suite ran on. NOT "
+        "optional for v2: arch is an input to the run_id hash, so an empty value makes "
+        "v2_run_id refuse to derive an id and every row lands unjoinable.",
     )
     parser.add_argument(
         "--img-digest",
         default="",
         help="Digest of the runner image the suite ran against, if known",
     )
+    # Which schema generation to write. Defaults to v1 ONLY, so an un-updated caller behaves
+    # exactly as before -- this script runs from a BAKED image, so old and new images coexist
+    # until every product image is rebuilt.
+    #
+    # v1 is not a permanent home: v2 replaces these tables outright. run_properties becomes
+    # test_cases.tags, and the per-product test_runs/test_cases collapse into the shared
+    # test_cases + test_case_runs keyed by component -- which is why the spyre-frameworks v2
+    # DDL deliberately does not define them. No data is ported: v1 rows cannot produce a v2
+    # run_id, since the hash inputs were never recorded per row. New data only.
+    parser.add_argument(
+        "--schema",
+        choices=["v1", "v2", "both"],
+        default=os.environ.get("INGEST_SCHEMA", "v1"),
+        help="Which schema generation to write: v1 (default, the legacy per-product tables), "
+        "v2 (the shared replacement tables only), or both (the migration window). Also "
+        "settable via INGEST_SCHEMA so a workflow can set it once for every leg.",
+    )
     args = parser.parse_args()
+    # Resolved once, so the two paths cannot drift into disagreeing about what was asked for.
+    args.write_v1 = args.schema in ("v1", "both")
+    args.write_v2 = args.schema in ("v2", "both")
+    print(f"  schema={args.schema} (v1={args.write_v1} v2={args.write_v2})")
 
     if args.xml_file:
         xml_root = Path(args.xml_file).parent
@@ -616,6 +655,12 @@ def main():
         f"{os.environ['CLICKHOUSE_HOST']}:{os.environ.get('CLICKHOUSE_PORT', 443)} ..."
     )
     client = get_client()
+    # Separate connection for the v2 tables -- see get_v2_client(). None when
+    # CLICKHOUSE_DB_V2 is unset, which every v2 site treats as "v2 not configured".
+    v2client = get_v2_client() if args.write_v2 else None
+    if args.write_v2 and v2client is None:
+        print("  WARN --schema asked for v2 but CLICKHOUSE_DB_V2 is unset — v2 rows skipped",
+              file=sys.stderr)
     client.command("SELECT 1")
     print("Connected.\n")
 
@@ -652,22 +697,25 @@ def main():
         # but two distinct runs must never collapse. runner_run_id mirrors run_id for a
         # Jenkins/standalone leg, so it's only an independent signal for a GHA numeric id.
         runner_run_id = _runner_run_id(args, run_id)
-        existing = client.query(
-            "SELECT count() FROM si_test_runs "
-            "WHERE run_id = {run_id:String} AND filename = {filename:String}",
-            parameters={"run_id": run_id, "filename": run["filename"]},
-        )
-        if existing.result_rows[0][0] == 0 and runner_run_id and runner_run_id != run_id:
-            # A GHA re-ingest mints a fresh uuid4, so fall back to the numeric
-            # run id to keep that path idempotent.
+        # v1-table reads, so gated on v1 being written. v2 dedups against its own
+        # table via v2_already_ingested(run_id, component).
+        if args.write_v1:
             existing = client.query(
-                "SELECT count() FROM si_test_runs WHERE "
-                "runner_run_id = {runner_run_id:String} AND filename = {filename:String}",
-                parameters={"runner_run_id": runner_run_id, "filename": run["filename"]},
+                "SELECT count() FROM si_test_runs "
+                "WHERE run_id = {run_id:String} AND filename = {filename:String}",
+                parameters={"run_id": run_id, "filename": run["filename"]},
             )
-        if existing.result_rows[0][0] > 0:
-            print(f"  Already ingested — skipping {run['filename']}")
-            continue
+            if existing.result_rows[0][0] == 0 and runner_run_id and runner_run_id != run_id:
+                # A GHA re-ingest mints a fresh uuid4, so fall back to the numeric
+                # run id to keep that path idempotent.
+                existing = client.query(
+                    "SELECT count() FROM si_test_runs WHERE "
+                    "runner_run_id = {runner_run_id:String} AND filename = {filename:String}",
+                    parameters={"runner_run_id": runner_run_id, "filename": run["filename"]},
+                )
+            if existing.result_rows[0][0] > 0:
+                print(f"  Already ingested — skipping {run['filename']}")
+                continue
 
         print(
             f"  run_id={run_id}  tests={run['total_tests']}  "
@@ -675,12 +723,13 @@ def main():
             f"xpass={run['xpass']}  xfail={run['xfail']}  skipped={run['skipped']}"
         )
 
-        insert_run(client, run_id, run, args)
-        insert_cases(client, run_id, cases, workflow=args.workflow)
-        insert_properties(client, run_id, cases)
+        if args.write_v1:
+            insert_run(client, run_id, run, args)
+            insert_cases(client, run_id, cases, workflow=args.workflow)
+            insert_properties(client, run_id, cases)
         # v2 tables, alongside v1. Guarded so this script still runs against a
         # database where the migration has not landed.
-        if v2_tables_present(client):
+        if v2client is not None and v2_tables_present(v2client):
             _v2_source, _v2_ext = v2_source_and_external_run_id(args, run_id)
             _v2_tier = (getattr(args, "trigger_type", "") or "").strip()
             _v2_arch = (args.platform or run.get("platform") or "").strip()
@@ -694,18 +743,19 @@ def main():
                     f"tier={_v2_tier!r}); --trigger-type is the field usually missing",
                     file=sys.stderr,
                 )
-            elif v2_already_ingested(client, _v2_run_id, V2_COMPONENT):
+            elif v2_already_ingested(v2client, _v2_run_id, V2_COMPONENT):
                 print(f"  v2: already ingested run_id={_v2_run_id} — skipping")
             else:
-                _n = insert_v2(client, V2_COMPONENT, _v2_run_id, cases)
+                _n = insert_v2(v2client, V2_COMPONENT, _v2_run_id, cases)
                 print(f"  v2: {_n} test_case_runs under run_id={_v2_run_id}")
 
 
         total_cases += len(cases)
-        print(
-            f"  Inserted {len(cases)} test cases + "
-            f"{sum(len(c['properties']) for c in cases)} properties"
-        )
+        if args.write_v1:
+            print(
+                f"  Inserted {len(cases)} test cases + "
+                f"{sum(len(c['properties']) for c in cases)} properties"
+            )
 
     print(f"\nDone. {len(xml_files)} file(s) processed.")
     print(f"  Test cases ingested:  {total_cases}")
