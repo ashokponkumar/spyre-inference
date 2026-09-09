@@ -26,6 +26,7 @@ import logging
 import os
 import sys
 import time
+import uuid
 from argparse import ArgumentParser
 from typing import Any
 
@@ -36,6 +37,34 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
 RESULTS_TABLE = "results_v3"
+# Upstream-aligned table (pytorch/test-infra benchmark.oss_ci_benchmark_v3) plus our run_id.
+# Written ALONGSIDE results_v3, never instead of it: the HUD reads the flat table today.
+VLLM_V3_TABLE = "vllm_results_v3"
+
+# uuid5 namespace for v2 run identity. Must match the frameworks writers byte for byte --
+# a different namespace mints a run_id that joins to nothing.
+V2_NAMESPACE = uuid.UUID("cb0af9bf-2858-5eab-9211-f51190531bf3")
+
+
+def v2_canonical_arch(arch: str) -> str:
+    """amd64/x86 fold to x86_64. Folded INSIDE the hash, so both spellings of one machine
+    produce ONE run_id -- otherwise the same run lands twice, unjoinable to each other."""
+    a = (arch or "").strip()
+    return "x86_64" if a in ("amd64", "x86") else a
+
+
+def v2_run_id(source: str, external_run_id: str, arch: str, test_type: str) -> str:
+    """uuid5 over source|external_run_id|arch|test_type. Empty on incomplete input:
+    a partial key would collide every such run onto one id."""
+    src = (source or "").strip()
+    ext = (external_run_id or "").strip()
+    a = v2_canonical_arch(arch)
+    tt = (test_type or "").strip()
+    if not (src and ext and a and tt):
+        return ""
+    return str(uuid.uuid5(V2_NAMESPACE, f"{src}|{ext}|{a}|{tt}"))
+
+
 METADATA_TABLE = "run_metadata"
 
 
@@ -59,6 +88,29 @@ def parse_args() -> Any:
         type=str,
         default=os.environ.get("BENCHMARK_ARCH", "x86_64"),
         help="hardware architecture the benchmark ran on (e.g. x86_64, ppc64le, s390x)",
+    )
+    parser.add_argument(
+        "--v2-run-id",
+        type=str,
+        default=os.environ.get("V2_RUN_ID", ""),
+        help="An ALREADY-DERIVED v2 run_id (a uuid). Jenkins passes the orchestrator's own "
+        "params.RUN_ID here and it is used VERBATIM -- re-hashing an already-hashed id "
+        "mints a third identity that joins to nothing. Mutually exclusive with the "
+        "derive-from-GHA path below.",
+    )
+    parser.add_argument(
+        "--gha-run-id",
+        type=str,
+        default=os.environ.get("GITHUB_RUN_ID", ""),
+        help="GitHub Actions run id. Used to DERIVE a v2 run_id when --v2-run-id is absent. "
+        "Distinct flags rather than sniffing the shape of one value: a numeric id and a "
+        "uuid must not be told apart by guessing.",
+    )
+    parser.add_argument(
+        "--test-type",
+        type=str,
+        default=os.environ.get("TRIGGER_TYPE", "perf"),
+        help="Tier for the run_id hash. 'perf' for a benchmark leg.",
     )
     parser.add_argument(
         "--dry-run",
@@ -265,7 +317,101 @@ def extract_rows(
     return rows
 
 
-def insert_to_clickhouse(rows: list[dict[str, Any]]) -> None:
+def _parse_input_shapes(test_name: str) -> dict[str, Any]:
+    """tp1_in64_out64 -> the shape Map upstream carries in `inputs`.
+
+    These discriminate two runs of the SAME benchmark. The flat table kept them only
+    inside the test_name string, so a tp1 and a tp4 result were indistinguishable
+    without substring parsing at read time.
+    """
+    out: dict[str, Any] = {}
+    for token in (test_name or "").split("_"):
+        for prefix, key in (("tp", "tensor_parallel"), ("in", "input_len"), ("out", "output_len")):
+            rest = token[len(prefix) :]
+            if token.startswith(prefix) and rest.isdigit():
+                out[key] = ("int", {"value": rest})
+    return out
+
+
+def to_vllm_v3_rows(rows: list[dict[str, Any]], run_id: str) -> list[dict[str, Any]]:
+    """Reshape flat results_v3 rows into the upstream-aligned nested shape.
+
+    Derived from the SAME rows the flat table gets, so the two tables can never disagree
+    about a number -- only about shape. Recovers four things the flat write dropped:
+    head_sha as a real column (blank on every flat row, hidden in extra), the benchmark
+    name (the flat write hardcodes one constant for all benchmarks), model.backend (the
+    HUD's pivot axis, absent entirely), and the metric samples as an Array.
+    """
+    out = []
+    for r in rows:
+        extra = json.loads(r["extra"])
+        test_name = extra.get("test_name", "")
+        # vLLM's own mode: latency | throughput | serve. Already the test_name prefix.
+        mode = test_name.split("_")[0] if test_name else ""
+        out.append(
+            {
+                "run_id": run_id,
+                "timestamp": r["timestamp"],
+                "schema_version": "v3",
+                # The benchmark name, not a constant -- this is what makes per-benchmark
+                # history possible at all.
+                "name": test_name or r["metric"],
+                "repo": r["repo"],
+                "head_branch": r["head_branch"],
+                "head_sha": extra.get("head_sha", ""),
+                "workflow_id": r["workflow_id"],
+                "run_attempt": int(r.get("run_attempt") or 0),
+                "job_id": int(r.get("job_id") or 0),
+                "runners": [(extra.get("hardware_type", ""), extra.get("device", ""))],
+                "benchmark": (test_name, mode, "", {}),
+                # backend is a COLUMN, never a hash input: it is the axis a cross-backend
+                # comparison pivots ON, so folding it into identity would make the two
+                # sides of the comparison different benchmarks. That was v1's mistake.
+                "model": (
+                    extra.get("model", ""),
+                    "llm",
+                    extra.get("device", ""),
+                    ["huggingface"],
+                ),
+                # Array, so variance and percentiles stay recomputable downstream.
+                "metric": (r["metric"], [float(r["actual"])], float(r["target"] or 0.0), {}),
+                "inputs": _parse_input_shapes(test_name),
+                "dependencies": {},
+                # Only what is NOT already a first-class column, so the same value is not
+                # stored twice and cannot drift between the two copies.
+                "extra": {
+                    k: str(v)
+                    for k, v in extra.items()
+                    if k not in ("head_sha", "model", "test_name")
+                },
+            }
+        )
+    return out
+
+
+def resolve_v2_run_id(args) -> str:
+    """The v2 run_id for this leg, or "" when it cannot be derived.
+
+    Two paths, kept explicit. Jenkins already HOLDS the orchestrator's v2 run_id
+    (params.RUN_ID) -- use it verbatim. GHA holds only its own integer run id, so the id is
+    derived from (gha, run id, arch, test_type). Empty means the v2 write is skipped rather
+    than writing an unjoinable row, which downstream cannot tell apart from "no perf ran".
+    """
+    verbatim = (getattr(args, "v2_run_id", "") or "").strip()
+    if verbatim:
+        try:
+            uuid.UUID(verbatim)
+        except (ValueError, AttributeError, TypeError):
+            log.warning("--v2-run-id %r is not a uuid; v2 rows skipped", verbatim)
+            return ""
+        return verbatim
+    gha = (getattr(args, "gha_run_id", "") or "").strip()
+    if not gha:
+        return ""
+    return v2_run_id("gha", gha, args.arch, getattr(args, "test_type", "perf"))
+
+
+def insert_to_clickhouse(rows: list[dict[str, Any]], v2_run_id_value: str = "") -> None:
     """Insert rows into ClickHouse using environment-configured connection."""
     clickhouse_env_vars = {
         "CLICKHOUSE_HOST": os.environ.get("CLICKHOUSE_HOST"),
@@ -304,6 +450,38 @@ def insert_to_clickhouse(rows: list[dict[str, Any]]) -> None:
         column_names=columns,
     )
     log.info("Inserted %d rows into %s", len(rows), RESULTS_TABLE)
+
+    # Upstream-aligned copy, additive. Contained: results_v3 is what the HUD reads today, so
+    # a failure here must never cost those rows -- and an absent table is the normal state
+    # until the DDL lands, not an error.
+    if v2_run_id_value:
+        try:
+            if client.command(f"EXISTS TABLE {VLLM_V3_TABLE}"):
+                v2_rows = to_vllm_v3_rows(rows, v2_run_id_value)
+                v2_cols = list(v2_rows[0].keys())
+                client.insert(
+                    VLLM_V3_TABLE,
+                    [[r[c] for c in v2_cols] for r in v2_rows],
+                    column_names=v2_cols,
+                )
+                log.info(
+                    "Inserted %d rows into %s under run_id=%s",
+                    len(v2_rows),
+                    VLLM_V3_TABLE,
+                    v2_run_id_value,
+                )
+            else:
+                log.info("%s absent — upstream-shaped rows skipped", VLLM_V3_TABLE)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("%s write failed, %s unaffected: %r", VLLM_V3_TABLE, RESULTS_TABLE, exc)
+    else:
+        # Loud: without a run_id the perf numbers cannot reach an artifact, and a blank
+        # artifact page reads as "no perf ran" rather than "not linked".
+        log.warning(
+            "no v2 run_id (pass --v2-run-id on Jenkins, or --gha-run-id + --arch on Actions) "
+            "— upstream-shaped rows skipped, %s still written",
+            RESULTS_TABLE,
+        )
 
     # Insert metadata rows (required for dashboard commit picker)
     metadata_rows: list[dict[str, Any]] = []
@@ -364,7 +542,7 @@ def main() -> None:
             print(f"... and {len(rows) - 5} more")
         return
 
-    insert_to_clickhouse(rows)
+    insert_to_clickhouse(rows, resolve_v2_run_id(args))
 
 
 if __name__ == "__main__":
