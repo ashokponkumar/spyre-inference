@@ -39,6 +39,12 @@ from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 
+# v2_schema is a SIBLING file, not an installed package: this script is copied into three
+# repos and run by path (`uv run --no-project .../ingest_xml*.py`), so its own directory is only
+# on sys.path when it is the entry point. A caller that loads it via spec_from_file_location --
+# as the ingest tests do -- would otherwise fail at this import.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 import clickhouse_connect
 import v2_schema
 from lxml import etree
