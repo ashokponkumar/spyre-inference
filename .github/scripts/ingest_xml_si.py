@@ -444,9 +444,7 @@ def v2_test_case_id(component: str, classname: str, name: str, tags) -> str:
     return str(
         uuid.uuid5(
             V2_NAMESPACE,
-            V2_SEP.join(
-                (_v2_norm(component), _v2_norm(classname), _v2_norm(name), ",".join(norm))
-            ),
+            V2_SEP.join((_v2_norm(component), _v2_norm(classname), _v2_norm(name), ",".join(norm))),
         )
     )
 
@@ -498,10 +496,7 @@ def v2_source_and_external_run_id(args, run_id: str):
 def v2_tables_present(client) -> bool:
     """v2 write path is skipped unless BOTH tables exist, so this script can be
     deployed before the migration without erroring on every run."""
-    return all(
-        bool(client.command(f"EXISTS TABLE {t}"))
-        for t in ("test_cases", "test_case_runs")
-    )
+    return all(bool(client.command(f"EXISTS TABLE {t}")) for t in ("test_cases", "test_case_runs"))
 
 
 def v2_already_ingested(client, run_id: str, component: str) -> bool:
@@ -659,8 +654,10 @@ def main():
     # CLICKHOUSE_DB_V2 is unset, which every v2 site treats as "v2 not configured".
     v2client = get_v2_client() if args.write_v2 else None
     if args.write_v2 and v2client is None:
-        print("  WARN --schema asked for v2 but CLICKHOUSE_DB_V2 is unset — v2 rows skipped",
-              file=sys.stderr)
+        print(
+            "  WARN --schema asked for v2 but CLICKHOUSE_DB_V2 is unset — v2 rows skipped",
+            file=sys.stderr,
+        )
     client.command("SELECT 1")
     print("Connected.\n")
 
