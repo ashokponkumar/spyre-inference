@@ -55,6 +55,13 @@ inputs:
     description: Tier for the run_id hash; 'perf' for a benchmark leg.
     required: false
     default: perf
+  rpm-lock:
+    description: >-
+      Path to spyre-rpms.lock. On Actions this file IS the identity of the stack under test
+      (the leg restores a cache keyed on it and builds nothing), so each pinned RPM's
+      artifact_id is derived from it and linked to this run. Empty disables the link.
+    required: false
+    default: spyre-rpms.lock
   clickhouse-host:
     description: ClickHouse host. Empty = skip the whole ingest (clean no-op).
     required: false
@@ -148,4 +155,5 @@ runs:
           --arch "${{ inputs.arch }}" \
           --gha-run-id "${{ inputs.run-id }}" \
           --v2-run-id "${{ inputs.v2-run-id }}" \
-          --test-type "${{ inputs.test-type }}"
+          --test-type "${{ inputs.test-type }}" \
+          --rpm-lock "${{ inputs.rpm-lock }}"

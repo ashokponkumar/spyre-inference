@@ -24,6 +24,7 @@ import glob
 import json
 import logging
 import os
+import re
 import sys
 import time
 import uuid
@@ -111,6 +112,15 @@ def parse_args() -> Any:
         type=str,
         default=os.environ.get("TRIGGER_TYPE", "perf"),
         help="Tier for the run_id hash. 'perf' for a benchmark leg.",
+    )
+    parser.add_argument(
+        "--rpm-lock",
+        type=str,
+        default=os.environ.get("SPYRE_RPM_LOCK", "spyre-rpms.lock"),
+        help="Path to spyre-rpms.lock. On the GHA path this file IS the content identity of "
+        "the stack under test -- the leg builds nothing, it restores a cache keyed on this "
+        "file -- so each pinned RPM's artifact_id is recovered from it and an "
+        "artifact_results row is written per artifact. Empty disables the artifact write.",
     )
     parser.add_argument(
         "--dry-run",
@@ -317,6 +327,74 @@ def extract_rows(
     return rows
 
 
+# ── GHA artifact identity ────────────────────────────────────────────────────────────────
+# A GHA perf leg builds nothing: it restores a cache keyed on spyre-rpms.lock and extracts
+# those exact RPMs. So the honest content identity of what it measured is the LOCK, and the
+# artifact_id of each pinned RPM is recoverable from it -- the builder embeds the same id12
+# in the NEVRA that it puts in artifact_id and in the artifact_refs glob.
+#   NEVRA: ibm-flex-2.0.0-0.main.495+495.a86bb35a.3a6b688cc40a.a86bb35.el10
+#                                                 ^^^^^^^^^^^^ id12
+# This is why the GHA path does NOT need a digest threaded from Jenkins.
+
+_NEVRA_ID12 = re.compile(r"\.([0-9a-f]{12})\.")
+# name-<version>... : the package name is everything before the first -<digit>.
+_NEVRA_NAME = re.compile(r"^(.+?)-\d")
+
+
+def parse_rpm_lock(lock_path: str) -> list[tuple[str, str]]:
+    """[(package_name, id12)] for each pinned RPM. Skips any line without exactly one
+    id12-shaped token rather than guessing which to take -- a wrong artifact_id is worse
+    than an absent one, because it attributes results to the wrong build.
+    """
+    out: list[tuple[str, str]] = []
+    try:
+        with open(lock_path, encoding="utf-8") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return out
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        ids = _NEVRA_ID12.findall(line)
+        name = _NEVRA_NAME.match(line)
+        if len(ids) == 1 and name:
+            out.append((name.group(1), ids[0]))
+        else:
+            log.warning("spyre-rpms.lock: cannot derive a unique id12 from %r — skipped", line)
+    return out
+
+
+def rpm_artifact_ids(lock_path: str, arch: str) -> list[str]:
+    """artifact_id for every RPM the leg installed: {component}|{name}|{id12}|{arch}.
+
+    The component is the RPM name minus its `ibm-` vendor prefix and any `-devel`/`-headers`
+    suffix, which is how the builder names it. Verified against prod: `ibm-flex-devel` and
+    `ibm-flex` share one id12 and one component, so the two rows collapse to one artifact.
+    """
+    a = v2_canonical_arch(arch)
+    if not a:
+        return []
+    seen: dict[str, None] = {}
+    for name, id12 in parse_rpm_lock(lock_path):
+        base = name[4:] if name.startswith("ibm-") else name
+        # -devel/-headers ship alongside the base package from ONE build and share its id12.
+        # Verified against prod: the builder registers only the base name (ibm-flex, never
+        # ibm-flex-devel), so a per-subpackage artifact_id would name a row that cannot exist.
+        for suffix in ("-devel", "-headers"):
+            if base.endswith(suffix):
+                base = base[: -len(suffix)]
+                break
+        component = base
+        for suffix in ("-core", "-dd2", "-e2e"):
+            if component.endswith(suffix):
+                component = component[: -len(suffix)]
+                break
+        artifact_name = base if base.startswith("ibm-") else f"ibm-{base}"
+        seen.setdefault(f"{component}|{artifact_name}|{id12}|{a}", None)
+    return list(seen)
+
+
 def _parse_input_shapes(test_name: str) -> dict[str, Any]:
     """tp1_in64_out64 -> the shape Map upstream carries in `inputs`.
 
@@ -411,7 +489,94 @@ def resolve_v2_run_id(args) -> str:
     return v2_run_id("gha", gha, args.arch, getattr(args, "test_type", "perf"))
 
 
-def insert_to_clickhouse(rows: list[dict[str, Any]], v2_run_id_value: str = "") -> None:
+def _write_artifact_results(client, v2_rows, run_id_value: str, rpm_lock: str, arch: str) -> None:
+    """One artifact_results row per RPM the leg installed, linking perf to what it measured.
+
+    Why per RPM and not one row: a GHA perf leg has no single built image. Its stack is the set
+    of pinned RPMs, so every one of them is an artifact the run exercised, and pointing the
+    result at all of them is what makes each component's artifact page show the perf that ran
+    against it.
+
+    result_kind='performance' with test_type='perf', matching the rows Jenkins pushArtifactResult
+    already writes -- this is the same contract from the other launcher, not a new one.
+
+    Contained: this is the FIRST writer to artifact_results from Actions (prod has 4,921 Jenkins
+    rows and zero GHA), so a failure here must not cost the benchmark rows already written.
+    """
+    if not rpm_lock:
+        return
+    try:
+        ids = rpm_artifact_ids(rpm_lock, arch)
+        if not ids:
+            log.info("no artifact_id derivable from %s — artifact link skipped", rpm_lock)
+            return
+        if not client.command("EXISTS TABLE artifact_results"):
+            log.info("artifact_results absent — artifact link skipped")
+            return
+        # artifact_results is a plain MergeTree with no dedup key, so a re-ingest of one leg
+        # DOUBLES its rows -- and every per-artifact counter is derived from them. Check first.
+        already = client.query(
+            "SELECT count() FROM artifact_results "
+            "WHERE run_id = {rid:UUID} AND result_kind = 'performance'",
+            parameters={"rid": run_id_value},
+        ).result_rows
+        if already and already[0][0] > 0:
+            log.info("artifact link already present for run_id=%s — skipping", run_id_value)
+            return
+        first = v2_rows[0]
+        cols = [
+            "artifact_id",
+            "run_id",
+            "result_kind",
+            "test_type",
+            "state",
+            "arch",
+            "total_tests",
+            "passed",
+            "failed",
+            "errors",
+            "skipped",
+            "duration_s",
+            "props",
+        ]
+        # total_tests counts BENCHMARKS, not metrics: 26 metrics of one benchmark is one
+        # measurement, and counting metrics would inflate every perf leg ~26x.
+        benchmarks = len({r["name"] for r in v2_rows})
+        rows = [
+            [
+                aid,
+                run_id_value,
+                "performance",
+                "perf",
+                "passed",
+                v2_canonical_arch(arch),
+                benchmarks,
+                benchmarks,
+                0,
+                0,
+                0,
+                0.0,
+                {
+                    "source": "gha",
+                    "workflow_id": str(first["workflow_id"]),
+                    "rpm_lock": rpm_lock,
+                    "head_sha": first["head_sha"],
+                },
+            ]
+            for aid in ids
+        ]
+        client.insert("artifact_results", rows, column_names=cols)
+        log.info("Linked %d artifact(s) to run_id=%s in artifact_results", len(rows), run_id_value)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("artifact_results link failed, benchmark rows unaffected: %r", exc)
+
+
+def insert_to_clickhouse(
+    rows: list[dict[str, Any]],
+    v2_run_id_value: str = "",
+    rpm_lock: str = "",
+    arch: str = "",
+) -> None:
     """Insert rows into ClickHouse using environment-configured connection."""
     clickhouse_env_vars = {
         "CLICKHOUSE_HOST": os.environ.get("CLICKHOUSE_HOST"),
@@ -470,6 +635,7 @@ def insert_to_clickhouse(rows: list[dict[str, Any]], v2_run_id_value: str = "") 
                     VLLM_V3_TABLE,
                     v2_run_id_value,
                 )
+                _write_artifact_results(client, v2_rows, v2_run_id_value, rpm_lock, arch)
             else:
                 log.info("%s absent — upstream-shaped rows skipped", VLLM_V3_TABLE)
         except Exception as exc:  # noqa: BLE001
@@ -542,7 +708,7 @@ def main() -> None:
             print(f"... and {len(rows) - 5} more")
         return
 
-    insert_to_clickhouse(rows, resolve_v2_run_id(args))
+    insert_to_clickhouse(rows, resolve_v2_run_id(args), getattr(args, "rpm_lock", ""), args.arch)
 
 
 if __name__ == "__main__":
