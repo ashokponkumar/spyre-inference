@@ -571,6 +571,145 @@ def _write_artifact_results(client, v2_rows, run_id_value: str, rpm_lock: str, a
         log.warning("artifact_results link failed, benchmark rows unaffected: %r", exc)
 
 
+# ── v2 benchmarks / benchmark_runs ───────────────────────────────────────────────────────
+# The perf surfaces of the v2 dashboard read this dimension+fact pair, not the flat tables.
+V2_BENCH_COMPONENT = "spyre-inference"
+
+
+def _strip_pytorch_suffix(name: str) -> str:
+    """One benchmark must not split by which file reported it: the writer reads both the
+    native json and the `.pytorch.json` copy, and a benchmark_id is a content hash."""
+    return re.sub(r"\.pytorch\.json$|\.json$", "", name or "")
+
+
+# In the hash, not merely in props: mode and the input shapes are what separate two runs of
+# the same model, and component is what keeps a `latency` here distinct from a same-named
+# benchmark in another producer's suite.
+_V2_BENCH_ID_KEYS = ("record_type", "run_mode", "tensor_parallel", "input_len", "output_len")
+
+
+def v2_benchmark_id(component: str, name: str, tags, disc: dict[str, Any]) -> str:
+    """uuid5 over component + name + sorted(tags) + the identity discriminators. Empty name
+    refuses an id: it would collide every unidentifiable benchmark onto one identity."""
+    n = _strip_pytorch_suffix((name or "").strip())
+    if not n:
+        return ""
+    tag_part = ",".join(sorted({str(t).strip() for t in (tags or []) if str(t).strip()}))
+    disc_part = ",".join(f"{k}={str(disc.get(k) or '')}" for k in _V2_BENCH_ID_KEYS)
+    return str(uuid.uuid5(V2_NAMESPACE, f"{component}|{n}|{tag_part}|{disc_part}"))
+
+
+def to_v2_benchmark_rows(v2_rows: list[dict[str, Any]], run_id: str) -> tuple[dict, list]:
+    """Collapse the per-metric rows into one benchmark_runs row per (benchmark, backend).
+
+    26 metrics of one benchmark are one measurement, so they belong in the measurements Map
+    of a single row -- one row per metric would multiply every trend point by the metric
+    count. backend stays a COLUMN and never a hash input: it is the axis a cross-backend
+    comparison pivots on.
+    """
+    ident_rows: dict[str, list] = {}
+    facts: dict[tuple[str, str], dict[str, Any]] = {}
+    for r in v2_rows:
+        name = _strip_pytorch_suffix(r.get("name") or "")
+        if not name:
+            continue
+        _model, _mtype, backend, _origins = r["model"]
+        shapes = {k: v[1]["value"] for k, v in (r.get("inputs") or {}).items()}
+        disc = {"record_type": "model", "run_mode": r["benchmark"][1], **shapes}
+        bid = v2_benchmark_id(V2_BENCH_COMPONENT, name, [], disc)
+        if not bid:
+            continue
+        props = {k: str(v) for k, v in disc.items() if v != ""}
+        # The native latency json carries no model, so _model_from_record falls back to the
+        # filename. Keep it only when it says something the name does not already.
+        if _model and _model != name:
+            props["model"] = _model
+        prev = ident_rows.get(bid)
+        # Two files report one benchmark; the richer props win so the merge cannot lose a field.
+        if prev:
+            merged = dict(prev[4])
+            merged.update(props)
+            props = merged
+        ident_rows[bid] = [bid, V2_BENCH_COMPONENT, name, [], props]
+        fact = facts.setdefault(
+            (bid, backend),
+            {
+                "run_id": run_id,
+                "benchmark_id": bid,
+                "component": V2_BENCH_COMPONENT,
+                "backend": backend,
+                "measurements": {},
+                "iterations": 0,
+                "props": {},
+            },
+        )
+        metric_name, samples, _target, _extra = r["metric"]
+        if samples:
+            fact["measurements"][metric_name] = float(samples[0])
+            fact["iterations"] = max(fact["iterations"], len(samples))
+    # chk_measurements refuses an empty map: nothing measured is a parse failure, not a result.
+    return ident_rows, [f for f in facts.values() if f["measurements"]]
+
+
+def _write_v2_benchmarks(client, v2_rows, run_id_value: str) -> None:
+    """benchmarks + benchmark_runs for this leg. Additive and contained: an absent table is
+    the normal state until the DDL lands, and a failure must not cost the flat rows."""
+    try:
+        if not client.command("EXISTS TABLE benchmarks") or not client.command(
+            "EXISTS TABLE benchmark_runs"
+        ):
+            log.info("benchmarks/benchmark_runs absent — v2 perf rows skipped")
+            return
+        # Plain MergeTree with no dedup key, so a re-ingest doubles every number behind a mean.
+        already = client.query(
+            "SELECT count() FROM benchmark_runs "
+            "WHERE component = {c:String} AND run_id = {rid:UUID}",
+            parameters={"c": V2_BENCH_COMPONENT, "rid": run_id_value},
+        ).result_rows
+        if already and already[0][0] > 0:
+            log.info("v2 perf rows already present for run_id=%s — skipping", run_id_value)
+            return
+        ident_rows, facts = to_v2_benchmark_rows(v2_rows, run_id_value)
+        if not facts:
+            log.warning("no v2 benchmark rows derivable — skipped")
+            return
+        # The dimension is also a plain MergeTree: a known identity re-inserted appends a
+        # duplicate, and the collision is ACROSS runs, so in-run dedup is not enough.
+        ids = list(ident_rows)
+        known = {
+            str(row[0])
+            for row in client.query(
+                "SELECT benchmark_id FROM benchmarks WHERE benchmark_id IN {ids:Array(UUID)}",
+                parameters={"ids": ids},
+            ).result_rows
+        }
+        new_ident = [row for bid, row in ident_rows.items() if bid not in known]
+        if new_ident:
+            client.insert(
+                "benchmarks",
+                new_ident,
+                column_names=["benchmark_id", "component", "name", "tags", "props"],
+            )
+        cols = [
+            "run_id",
+            "benchmark_id",
+            "component",
+            "backend",
+            "measurements",
+            "iterations",
+            "props",
+        ]
+        client.insert("benchmark_runs", [[f[c] for c in cols] for f in facts], column_names=cols)
+        log.info(
+            "Inserted %d benchmark identity row(s) and %d benchmark_runs row(s) under run_id=%s",
+            len(new_ident),
+            len(facts),
+            run_id_value,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("v2 perf write failed, %s unaffected: %r", RESULTS_TABLE, exc)
+
+
 def insert_to_clickhouse(
     rows: list[dict[str, Any]],
     v2_run_id_value: str = "",
@@ -636,6 +775,7 @@ def insert_to_clickhouse(
                     v2_run_id_value,
                 )
                 _write_artifact_results(client, v2_rows, v2_run_id_value, rpm_lock, arch)
+                _write_v2_benchmarks(client, v2_rows, v2_run_id_value)
             else:
                 log.info("%s absent — upstream-shaped rows skipped", VLLM_V3_TABLE)
         except Exception as exc:  # noqa: BLE001
