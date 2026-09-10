@@ -23,6 +23,11 @@ spyre-inference), so byte equality is unachievable while semantic equality is ex
 matters -- and a formatting-only difference is precisely what made one earlier fix need two
 different patches.
 
+This repo also requires an Apache header on every .py (.licenserc.yaml, scope `**/*.py`),
+which the other two copies do not carry. The fingerprint is an AST dump, so a missing header
+is INVISIBLE here -- a plain `cp` from another repo passes this check and fails the license
+check. Re-add the header after any such copy.
+
 Usage: check_v2_schema_drift.py <other copy> [<other copy> ...]
 """
 
