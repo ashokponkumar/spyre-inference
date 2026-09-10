@@ -185,29 +185,26 @@ def parse_test_xml(xml_path: Path):
 # ---------------------------------------------------------------------------
 
 
-def get_client(database: str | None = None):
+def get_client():
     return clickhouse_connect.get_client(
         host=os.environ["CLICKHOUSE_HOST"],
         port=int(os.environ.get("CLICKHOUSE_PORT", 443)),
         user=os.environ.get("CLICKHOUSE_USER", "default"),
         password=os.environ["CLICKHOUSE_PASS"],
-        database=database or os.environ.get("CLICKHOUSE_DB", "spyre"),
+        database=os.environ.get("CLICKHOUSE_DB", "spyre"),
         secure=True,
     )
 
 
-def get_v2_client():
-    """A SECOND connection, bound to the v2 database, or None when none is configured.
+def v2_database() -> str:
+    """The v2 database name, or "" when v2 is not configured.
 
-    v2 is a different DATABASE, not different table names: test_cases exists in both
-    generations with incompatible shapes, so one `database=` cannot serve both. Returns None
-    when CLICKHOUSE_DB_V2 is unset, which is what makes --schema v1 (the default) cost
-    nothing -- no second connection is opened.
+    A NAME rather than a second connection: the same instance holds both generations, so one
+    client serves both provided every v2 statement is QUALIFIED. Qualifying is not optional --
+    test_cases exists in both with incompatible shapes, so an unqualified name resolves
+    against whichever database the connection holds and silently hits the wrong table.
     """
-    db = os.environ.get("CLICKHOUSE_DB_V2", "").strip()
-    if not db:
-        return None
-    return get_client(database=db)
+    return os.environ.get("CLICKHOUSE_DB_V2", "").strip()
 
 
 def insert_run(client, run_id: str, run: dict, args):
@@ -500,13 +497,18 @@ def v2_source_and_external_run_id(args, run_id: str):
     return "local", run_id
 
 
-def v2_tables_present(client) -> bool:
+def v2_tables_present(client, db: str) -> bool:
     """v2 write path is skipped unless BOTH tables exist, so this script can be
     deployed before the migration without erroring on every run."""
-    return all(bool(client.command(f"EXISTS TABLE {t}")) for t in ("test_cases", "test_case_runs"))
+    return all(
+        bool(client.command(f"EXISTS TABLE {t.qualified(db)}"))
+        for t in (v2_schema.TEST_CASES, v2_schema.TEST_CASE_RUNS)
+    )
 
 
-def v2_already_ingested(client, run_id: str, component: str, source_file: str = "") -> bool:
+def v2_already_ingested(
+    client, db: str, run_id: str, component: str, source_file: str = ""
+) -> bool:
     """Has THIS source file's rows for this run already landed?
 
     test_case_runs is a plain MergeTree with no dedup key, so a double ingest of one leg
@@ -521,9 +523,10 @@ def v2_already_ingested(client, run_id: str, component: str, source_file: str = 
     `props['source_file']` carries the discriminator. props is a Map outside every key, so
     recording it costs no sort-order change.
     """
+    table = v2_schema.TEST_CASE_RUNS.qualified(db)
     if source_file:
         rows = client.query(
-            "SELECT count() FROM test_case_runs "
+            f"SELECT count() FROM {table} "
             "WHERE component = {component:String} AND run_id = {run_id:UUID} "
             "AND props['source_file'] = {sf:String}",
             parameters={"component": component, "run_id": run_id, "sf": source_file},
@@ -532,14 +535,16 @@ def v2_already_ingested(client, run_id: str, component: str, source_file: str = 
         # No discriminator given: fall back to the run-level check rather than skip
         # dedup entirely, so a caller that cannot name the file is still protected.
         rows = client.query(
-            "SELECT count() FROM test_case_runs "
+            f"SELECT count() FROM {table} "
             "WHERE component = {component:String} AND run_id = {run_id:UUID}",
             parameters={"component": component, "run_id": run_id},
         ).result_rows
     return bool(rows and rows[0][0] > 0)
 
 
-def insert_v2(client, component: str, run_id: str, cases: list, source_file: str = "") -> int:
+def insert_v2(
+    client, db: str, component: str, run_id: str, cases: list, source_file: str = ""
+) -> int:
     """Write test_cases (identity) + test_case_runs (outcome) for one leg.
 
     Rows are built as dicts and ordered by v2_schema, so a field cannot be assigned to the
@@ -585,8 +590,8 @@ def insert_v2(client, component: str, run_id: str, cases: list, source_file: str
         )
     # Cross-run dedup, not just in-leg: test_cases is a plain MergeTree, so re-inserting a
     # known identity appends a duplicate instead of collapsing it.
-    v2_schema.insert_identities(client, v2_schema.TEST_CASES, ident_rows)
-    v2_schema.insert(client, v2_schema.TEST_CASE_RUNS, run_rows)
+    v2_schema.insert_identities(client, v2_schema.TEST_CASES, ident_rows, db=db)
+    v2_schema.insert(client, v2_schema.TEST_CASE_RUNS, run_rows, db=db)
     if skipped_unidentifiable:
         print(
             f"  [warn] v2: {skipped_unidentifiable} case(s) skipped -- identity not derivable",
@@ -673,10 +678,10 @@ def main():
         f"{os.environ['CLICKHOUSE_HOST']}:{os.environ.get('CLICKHOUSE_PORT', 443)} ..."
     )
     client = get_client()
-    # Separate connection for the v2 tables -- see get_v2_client(). None when
-    # CLICKHOUSE_DB_V2 is unset, which every v2 site treats as "v2 not configured".
-    v2client = get_v2_client() if args.write_v2 else None
-    if args.write_v2 and v2client is None:
+    # One client, both generations: v2 is reached by QUALIFYING every statement with this
+    # database name (see v2_database). "" means v2 is not configured.
+    v2db = v2_database() if args.write_v2 else ""
+    if args.write_v2 and not v2db:
         print(
             "  WARN --schema asked for v2 but CLICKHOUSE_DB_V2 is unset — v2 rows skipped",
             file=sys.stderr,
@@ -753,7 +758,7 @@ def main():
         # authoritative, so the experimental write is contained rather than allowed to
         # abort the loop and drop every remaining file's v1 insert.
         try:
-            if v2client is not None and v2_tables_present(v2client):
+            if v2db and v2_tables_present(client, v2db):
                 _v2_source, _v2_ext = v2_source_and_external_run_id(args, run_id)
                 _v2_tier = (getattr(args, "trigger_type", "") or "").strip()
                 _v2_arch = (args.platform or run.get("platform") or "").strip()
@@ -767,10 +772,10 @@ def main():
                         f"tier={_v2_tier!r}); --trigger-type is the field usually missing",
                         file=sys.stderr,
                     )
-                elif v2_already_ingested(v2client, _v2_run_id, V2_COMPONENT, xml_path.name):
+                elif v2_already_ingested(client, v2db, _v2_run_id, V2_COMPONENT, xml_path.name):
                     print(f"  v2: already ingested run_id={_v2_run_id} — skipping")
                 else:
-                    _n = insert_v2(v2client, V2_COMPONENT, _v2_run_id, cases, xml_path.name)
+                    _n = insert_v2(client, v2db, V2_COMPONENT, _v2_run_id, cases, xml_path.name)
                     print(f"  v2: {_n} test_case_runs under run_id={_v2_run_id}")
         except Exception as _v2_err:
             print(f"  [warn] v2 write failed, v1 unaffected: {_v2_err!r}", file=sys.stderr)

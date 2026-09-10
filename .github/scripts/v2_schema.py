@@ -1,16 +1,3 @@
-# Copyright 2026 The Spyre-Inference Authors.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 """The v2 ClickHouse schema, as data — one module, byte-identical in all three product repos.
 
 WHY THIS EXISTS. Every v2 insert used to be a positional list paired with a separate
@@ -98,11 +85,19 @@ class Table:
             )
         return [values[c] for c in self.columns]
 
+    def qualified(self, db: str | None) -> str:
+        """`db.table` when a database is given, bare table otherwise.
+
+        Every v2 statement is qualified because one client now serves both generations:
+        `benchmark_runs` exists in v1 AND v2 with incompatible shapes, so an unqualified
+        name would resolve against whichever database the connection happens to hold.
+        """
+        return f"{db}.{self.name}" if db else self.name
+
 
 # ── the four v2 tables, columns in DDL order ────────────────────────────────────────────
 # `ts` is omitted from every one: it is DEFAULT now() and letting the server set it keeps the
-# ingest clock out of the data. props is omitted from TEST_CASE_RUNS for the same reason it is
-# absent from the writer today -- nothing populates it yet.
+# ingest clock out of the data.
 
 TEST_CASES = Table(
     name="test_cases",
@@ -129,29 +124,42 @@ TEST_CASE_RUNS = Table(
 
 BENCHMARKS = Table(
     name="benchmarks",
-    columns=("benchmark_id", "name", "tags", "props"),
-    required=("name",),
+    columns=("benchmark_id", "component", "name", "tags", "props"),
+    required=("component", "name"),
     identity="benchmark_id",
 )
 
 BENCHMARK_RUNS = Table(
     name="benchmark_runs",
-    columns=("run_id", "benchmark_id", "backend", "measurements", "iterations", "props"),
+    # component leads the identity hash and the sort key, so two repos writing the same
+    # benchmark name stay distinct rows rather than colliding on one benchmark_id.
+    columns=(
+        "run_id",
+        "benchmark_id",
+        "component",
+        "backend",
+        "measurements",
+        "iterations",
+        "props",
+    ),
+    required=("component",),
 )
 
 TABLES = {t.name: t for t in (TEST_CASES, TEST_CASE_RUNS, BENCHMARKS, BENCHMARK_RUNS)}
 
 
-def insert(client, table: Table, rows: Sequence[dict[str, Any]]) -> int:
+def insert(client, table: Table, rows: Sequence[dict[str, Any]], db: str | None = None) -> int:
     """Insert dicts into `table`, ordering every row through the one column list."""
     if not rows:
         return 0
     ordered = [table.row(r) for r in rows]
-    client.insert(table.name, ordered, column_names=list(table.columns))
+    client.insert(table.name, ordered, column_names=list(table.columns), database=db or None)
     return len(ordered)
 
 
-def insert_identities(client, table: Table, rows: dict[Any, dict[str, Any]]) -> int:
+def insert_identities(
+    client, table: Table, rows: dict[Any, dict[str, Any]], db: str | None = None
+) -> int:
     """Insert only the identity rows the dimension does not already hold.
 
     Both dimensions are plain MergeTree, so re-inserting a known identity APPENDS a duplicate
@@ -167,10 +175,10 @@ def insert_identities(client, table: Table, rows: dict[Any, dict[str, Any]]) -> 
     known = {
         str(r[0])
         for r in client.query(
-            f"SELECT {table.identity} FROM {table.name} "
+            f"SELECT {table.identity} FROM {table.qualified(db)} "
             f"WHERE {table.identity} IN {{ids:Array(UUID)}}",
             parameters={"ids": ids},
         ).result_rows
     }
     fresh = [v for k, v in rows.items() if str(k) not in known]
-    return insert(client, table, fresh)
+    return insert(client, table, fresh, db=db)
