@@ -199,7 +199,8 @@ runs:
 
     # Marker expression and coverage wiring both live in the Makefile test_target; COVERAGE=1 drops .coverage.* data files for the fan-in.
     # Bounded so a wedged card acquisition (a blocking open() on a contended /dev/vfio device) cannot hang the job silently -- failing here keeps the step's log and lets the post steps publish JUnit.
-    # Composite action steps don't support the `timeout-minutes` step key, so the same bound is enforced with the shell `timeout` command instead.
+    # Composite action steps don't support the `timeout-minutes` step key, so the bound is enforced with the shell `timeout` command instead.
+    # 6h, not the old 90m: under card contention a leg can legitimately spend hours waiting for a card, and the bound must only catch a WEDGE. It must stay below the calling job's own timeout-minutes (720) or the job is reaped first and this log is lost.
     - name: Run tests
       shell: bash
       env:
@@ -215,7 +216,7 @@ runs:
         fi
         export SPYRE_TEST_TIER
         echo "Resolved SPYRE_TEST_TIER=${SPYRE_TEST_TIER}"
-        timeout --signal=TERM --kill-after=1m 90m \
+        timeout --signal=TERM --kill-after=1m 6h \
           make ${{ inputs.test_target }} COVERAGE=1 JUNIT_XML=junit-${{ inputs.test_target }}.xml
         echo "tests done"
 
