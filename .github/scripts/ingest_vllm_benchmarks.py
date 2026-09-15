@@ -620,6 +620,16 @@ def _write_artifact_results(client, v2_rows, run_id_value: str, rpm_lock: str, a
                 0.0,
                 {
                     "source": "gha",
+                    # run_url is THE link key across the whole v2 schema -- one key for a
+                    # Jenkins build url or a GitHub Actions run url, so a reader never has to
+                    # know which system produced the row. Built here rather than left to the
+                    # reader: the URL shape is GitHub's, and a dashboard route should not have
+                    # to know it.
+                    "run_url": (
+                        f"https://github.com/{first['repo']}/actions/runs/{first['workflow_id']}"
+                        if first.get("repo") and first.get("workflow_id")
+                        else ""
+                    ),
                     "workflow_id": str(first["workflow_id"]),
                     "rpm_lock": rpm_lock,
                     "head_sha": first["head_sha"],
