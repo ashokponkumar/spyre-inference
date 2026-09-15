@@ -1,0 +1,207 @@
+# Copyright 2026 The Spyre-Inference Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""The v2 identities this writer derives must equal the ones every other writer derives.
+
+These ids are DERIVED, not threaded: a GHA perf leg reads its own RPM lockfile and computes
+the artifact_id the orchestrator would have written, with nothing passed between them. That
+only works while all writers agree byte-for-byte, so the golden values below are pinned as
+CONSTANTS rather than recomputed by the same code under test -- recomputing would pass even
+if every writer drifted together.
+
+The cross-writer contract these must match:
+  * torch-spyre  .github/scripts/ingest_xml.py  v2_artifact_id / v2_run_id
+  * frameworks   vars/pushToClickhouse.groovy   deriveArtifactIds / deriveRunIds
+  * frameworks   pipelines/lib/run_identity.py
+
+An earlier version of this file's v2_canonical_arch folded only ('amd64', 'x86') and did not
+lowercase, so 'AMD64' and 'x86-64' hashed differently here than in the other writers -- the
+same run landing twice, joinable to neither. test_arch_aliases_all_fold pins that.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import pathlib
+import sys
+import types
+import uuid
+
+import pytest
+
+_SCRIPT = pathlib.Path(__file__).resolve().parent / "ingest_vllm_benchmarks.py"
+
+# uuid5(NAMESPACE_DNS, "clickhouse-v2.spyre.ibm.com") -- the shared v2 namespace.
+_NS = "cb0af9bf-2858-5eab-9211-f51190531bf3"
+
+# Golden values, computed once from the agreed formula and pinned. Any change here is a
+# schema-wide breaking change, not a test fix.
+# gha|12345|amd64|integration
+_GOLDEN_RUN_ID = "dab2a67f-14bf-53be-b6e4-fc9642086e47"
+# torch-spyre|flex-rpm|abc123def456|x86_64
+_GOLDEN_ARTIFACT_ID = "86a5c6e3-bd2f-5d27-9a8f-9b8d23efc65b"
+# flex|ibm-flex|abc123def456|x86_64
+_GOLDEN_FLEX_ID = "937c72dc-85e1-5c35-9093-4a18cac7cda3"
+
+
+@pytest.fixture(scope="module")
+def mod():
+    """Load the ingest script by path; stub `utils`, which pulls in the repo's test deps."""
+    stub = types.ModuleType("utils")
+    stub.read_benchmark_results = lambda *a, **k: []
+    sys.modules.setdefault("utils", stub)
+    spec = importlib.util.spec_from_file_location("ingest_vllm_benchmarks", _SCRIPT)
+    m = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(m)
+    except ModuleNotFoundError as exc:  # clickhouse_connect absent
+        pytest.skip(f"ingest deps unavailable: {exc}")
+    return m
+
+
+# ── the shared namespace ────────────────────────────────────────────────────────
+
+
+def test_namespace_is_the_shared_v2_namespace(mod):
+    """Hardcoded as a literal here for speed; it must still equal the derived value, or every
+    id in this writer lands in a different space from every other writer's."""
+    assert str(mod.V2_NAMESPACE) == _NS
+    derived = uuid.uuid5(uuid.NAMESPACE_DNS, "clickhouse-v2.spyre.ibm.com")
+    assert derived == mod.V2_NAMESPACE
+
+
+# ── run_id ─────────────────────────────────────────────────────────────────────
+
+
+def test_run_id_matches_the_golden_value(mod):
+    assert mod.v2_run_id("gha", "12345", "amd64", "integration") == _GOLDEN_RUN_ID
+
+
+def test_run_id_is_blank_on_incomplete_input(mod):
+    """Blank, not a hash of defaults: an all-defaults key is a real uuid that every
+    incomplete run would share, which is worse than no id."""
+    assert mod.v2_run_id("", "12345", "amd64", "integration") == ""
+    assert mod.v2_run_id("gha", "", "amd64", "integration") == ""
+    assert mod.v2_run_id("gha", "12345", "", "integration") == ""
+    assert mod.v2_run_id("gha", "12345", "amd64", "") == ""
+
+
+# ── arch folding, the regression this file exists for ──────────────────────────
+
+
+@pytest.mark.parametrize("alias", ["amd64", "x86", "x86-64", "x86_64", "AMD64", " amd64 "])
+def test_arch_aliases_all_fold(mod, alias):
+    assert mod.v2_canonical_arch(alias) == "x86_64"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"), [("S390X", "s390x"), ("ppc64le", "ppc64le"), ("PPC64LE", "ppc64le")]
+)
+def test_non_x86_arch_is_lowercased_not_folded(mod, raw, expected):
+    assert mod.v2_canonical_arch(raw) == expected
+
+
+def test_arch_spelling_does_not_change_the_run_id(mod):
+    """The point of folding INSIDE the hash: one machine, one id, however it is spelled."""
+    ids = {
+        mod.v2_run_id("gha", "12345", a, "integration")
+        for a in ("amd64", "x86_64", "AMD64", "x86-64")
+    }
+    assert ids == {_GOLDEN_RUN_ID}
+
+
+# ── artifact_id ────────────────────────────────────────────────────────────────
+
+
+def test_artifact_id_matches_the_golden_value(mod):
+    assert (
+        mod.v2_artifact_id("torch-spyre", "flex-rpm", "abc123def456", "amd64")
+        == _GOLDEN_ARTIFACT_ID
+    )
+
+
+def test_artifact_id_is_case_and_space_insensitive(mod):
+    assert (
+        mod.v2_artifact_id("Torch-Spyre", " FLEX-RPM ", "ABC123DEF456", "AMD64")
+        == _GOLDEN_ARTIFACT_ID
+    )
+
+
+def test_artifact_id_refuses_a_blank_component_or_arch(mod):
+    assert mod.v2_artifact_id("", "flex-rpm", "abc123def456", "amd64") == ""
+    assert mod.v2_artifact_id("flex", "flex-rpm", "abc123def456", "") == ""
+
+
+def test_artifact_id_allows_a_blank_id12(mod):
+    """A GHA-derived identity carries a base-image + installed-set hash in that slot, and
+    some legs have neither -- blank is a legitimate value, unlike a blank component."""
+    assert mod.v2_artifact_id("flex", "ibm-flex", "", "amd64") != ""
+
+
+def test_content_changes_the_identity(mod):
+    a = mod.v2_artifact_id("flex", "ibm-flex", "abc123def456", "amd64")
+    for other in (
+        mod.v2_artifact_id("flex", "ibm-flex", "999999999999", "amd64"),
+        mod.v2_artifact_id("flex", "ibm-flex", "abc123def456", "s390x"),
+        mod.v2_artifact_id("deeptools", "ibm-flex", "abc123def456", "amd64"),
+    ):
+        assert other != a
+
+
+# ── the lockfile -> artifact_id path ──────────────────────────────────────────
+
+
+def _lock(tmp_path, *lines):
+    p = tmp_path / "spyre-rpms.lock"
+    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return str(p)
+
+
+def test_lockfile_yields_the_golden_flex_id(mod, tmp_path):
+    """The whole design in one assertion: a leg that only read its lockfile derives the id
+    the orchestrator wrote, so the perf numbers reach the artifact page."""
+    path = _lock(tmp_path, "ibm-flex-1.2.3-0.next.abc123def456.el10.x86_64.rpm")
+    assert mod.rpm_artifact_ids(path, "amd64") == [_GOLDEN_FLEX_ID]
+
+
+def test_devel_subpackage_collapses_onto_the_base_artifact(mod, tmp_path):
+    """-devel/-headers ship from ONE build and share its id12; the builder registers only the
+    base name, so a per-subpackage id would name a row that cannot exist."""
+    path = _lock(
+        tmp_path,
+        "ibm-flex-1.2.3-0.next.abc123def456.el10.x86_64.rpm",
+        "ibm-flex-devel-1.2.3-0.next.abc123def456.el10.x86_64.rpm",
+        "ibm-flex-headers-1.2.3-0.next.abc123def456.el10.x86_64.rpm",
+    )
+    assert mod.rpm_artifact_ids(path, "amd64") == [_GOLDEN_FLEX_ID]
+
+
+def test_every_id_is_a_uuid_not_a_delimited_string(mod, tmp_path):
+    """artifact_results.artifact_id is UUID in v2; a `component|name|id12|arch` string would
+    be rejected at insert."""
+    path = _lock(
+        tmp_path,
+        "ibm-flex-1.2.3-0.next.abc123def456.el10.x86_64.rpm",
+        "ibm-deeptools-2.0.0-0.next.fedcba987654.el10.x86_64.rpm",
+    )
+    ids = mod.rpm_artifact_ids(path, "amd64")
+    assert len(ids) == 2
+    for got in ids:
+        uuid.UUID(got)  # raises if not a uuid
+        assert "|" not in got
+
+
+def test_unknown_arch_yields_nothing(mod, tmp_path):
+    path = _lock(tmp_path, "ibm-flex-1.2.3-0.next.abc123def456.el10.x86_64.rpm")
+    assert mod.rpm_artifact_ids(path, "") == []

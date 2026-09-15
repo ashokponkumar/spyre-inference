@@ -47,23 +47,67 @@ VLLM_V3_TABLE = "vllm_results_v3"
 V2_NAMESPACE = uuid.UUID("cb0af9bf-2858-5eab-9211-f51190531bf3")
 
 
-def v2_canonical_arch(arch: str) -> str:
-    """amd64/x86 fold to x86_64. Folded INSIDE the hash, so both spellings of one machine
-    produce ONE run_id -- otherwise the same run lands twice, unjoinable to each other."""
-    a = (arch or "").strip()
-    return "x86_64" if a in ("amd64", "x86") else a
+def _v2_norm(value) -> str:
+    """Canonical scalar form for every hash input. Lowercasing is not cosmetic: the same
+    tier arrives as 'Regression' from a Jenkins parameter and 'regression' from a GHA
+    input, and any writer that skips it mints a different id for the same thing."""
+    return ("" if value is None else str(value)).strip().lower()
+
+
+def v2_canonical_arch(arch) -> str:
+    """amd64/x86/x86-64 all fold to x86_64. Folded INSIDE the hash, so both spellings of one
+    machine produce ONE run_id -- otherwise the same run lands twice, unjoinable to each
+    other. The alias list and the lowercasing must match the other writers exactly
+    (ingest_xml.py v2_canonical_arch, pushToClickhouse.groovy): 'AMD64' or 'x86-64' folding
+    here but not there is a silently unjoinable run."""
+    a = _v2_norm(arch)
+    return "x86_64" if a in ("amd64", "x86", "x86-64", "x86_64") else a
 
 
 def v2_run_id(source: str, external_run_id: str, arch: str, test_type: str) -> str:
     """uuid5 over source|external_run_id|arch|test_type. Empty on incomplete input:
     a partial key would collide every such run onto one id."""
-    src = (source or "").strip()
-    ext = (external_run_id or "").strip()
-    a = v2_canonical_arch(arch)
-    tt = (test_type or "").strip()
-    if not (src and ext and a and tt):
+    fields = (source, external_run_id, arch, test_type)
+    if not all(_v2_norm(f) for f in fields):
         return ""
-    return str(uuid.uuid5(V2_NAMESPACE, f"{src}|{ext}|{a}|{tt}"))
+    return str(
+        uuid.uuid5(
+            V2_NAMESPACE,
+            "|".join(
+                (
+                    _v2_norm(source),
+                    _v2_norm(external_run_id),
+                    v2_canonical_arch(arch),
+                    _v2_norm(test_type),
+                )
+            ),
+        )
+    )
+
+
+def v2_artifact_id(component: str, artifact_name: str, id12: str, arch: str) -> str:
+    """uuid5 over component|artifact_name|id12|arch -- the v2 artifact identity.
+
+    Same fields and order as v2_artifact_id() in torch-spyre's ingest_xml.py and
+    deriveArtifactIds() in pushToClickhouse.groovy, so this leg derives the id the
+    orchestrator would have written without anything being threaded to it. That is the
+    whole point: a GHA perf leg reads its own RPM lockfile and joins.
+    """
+    if not (_v2_norm(component) and v2_canonical_arch(arch)):
+        return ""
+    return str(
+        uuid.uuid5(
+            V2_NAMESPACE,
+            "|".join(
+                (
+                    _v2_norm(component),
+                    _v2_norm(artifact_name),
+                    _v2_norm(id12),
+                    v2_canonical_arch(arch),
+                )
+            ),
+        )
+    )
 
 
 METADATA_TABLE = "run_metadata"
@@ -385,7 +429,7 @@ def parse_rpm_lock(lock_path: str) -> list[tuple[str, str]]:
 
 
 def rpm_artifact_ids(lock_path: str, arch: str) -> list[str]:
-    """artifact_id for every RPM the leg installed: {component}|{name}|{id12}|{arch}.
+    """artifact_id (v2 uuid5) for every RPM the leg installed.
 
     The component is the RPM name minus its `ibm-` vendor prefix and any `-devel`/`-headers`
     suffix, which is how the builder names it. Verified against prod: `ibm-flex-devel` and
@@ -410,7 +454,12 @@ def rpm_artifact_ids(lock_path: str, arch: str) -> list[str]:
                 component = component[: -len(suffix)]
                 break
         artifact_name = base if base.startswith("ibm-") else f"ibm-{base}"
-        seen.setdefault(f"{component}|{artifact_name}|{id12}|{a}", None)
+        # Derived, not built as a delimited string: artifact_results.artifact_id is a UUID in
+        # v2, and the orchestrator hashes these same four fields, so both sides agree without
+        # this leg ever being told the id.
+        aid = v2_artifact_id(component, artifact_name, id12, a)
+        if aid:
+            seen.setdefault(aid, None)
     return list(seen)
 
 
@@ -550,16 +599,15 @@ def _write_artifact_results(client, v2_rows, run_id_value: str, rpm_lock: str, a
             "test_type",
             "state",
             "arch",
-            "total_tests",
-            "passed",
-            "failed",
-            "errors",
-            "skipped",
             "duration_s",
             "props",
         ]
-        # total_tests counts BENCHMARKS, not metrics: 26 metrics of one benchmark is one
-        # measurement, and counting metrics would inflate every perf leg ~26x.
+        # No total_tests/passed/failed/errors/skipped: v2 does not store them, because they are
+        # derivable by counting the run's own rows and a stored copy is a second source of truth.
+        # The benchmark count still goes in props -- a perf leg has no test_case_runs rows to
+        # count, so this is the only record of how many benchmarks it measured. It counts
+        # BENCHMARKS not metrics: 26 metrics of one benchmark is one measurement, so counting
+        # metrics would inflate every perf leg ~26x.
         benchmarks = len({r["name"] for r in v2_rows})
         rows = [
             [
@@ -569,17 +617,13 @@ def _write_artifact_results(client, v2_rows, run_id_value: str, rpm_lock: str, a
                 "perf",
                 "passed",
                 v2_canonical_arch(arch),
-                benchmarks,
-                benchmarks,
-                0,
-                0,
-                0,
                 0.0,
                 {
                     "source": "gha",
                     "workflow_id": str(first["workflow_id"]),
                     "rpm_lock": rpm_lock,
                     "head_sha": first["head_sha"],
+                    "benchmarks": str(benchmarks),
                 },
             ]
             for aid in ids
