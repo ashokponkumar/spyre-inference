@@ -156,7 +156,6 @@ runs:
           --job-id "${{ inputs.job-id }}" \
           --pr-number "${{ inputs.pr-number }}" \
           --arch "${{ inputs.arch }}" \
-          --gha-run-id "${{ inputs.run-id }}" \
           --v2-run-id "${{ inputs.v2-run-id }}" \
           --test-type "${{ inputs.test-type }}" \
           --rpm-lock "${{ inputs.rpm-lock }}"

@@ -125,6 +125,12 @@ def parse_args() -> Any:
     parser.add_argument("--workflow", type=str, default="vLLM Benchmark")
     parser.add_argument("--branch", type=str, required=True)
     parser.add_argument("--sha", type=str, required=True)
+    # THE run id for this leg, in two roles: upstream's `workflow_id` column, and the
+    # external_run_id half of the derived v2 run_id. One flag, because on every caller they are
+    # the same value -- a second --gha-run-id carrying the identical thing bought only a name to
+    # get wrong. The uuid form lives in --v2-run-id, which is a different TYPE and so stays a
+    # separate flag: telling a numeric id from a uuid by inspecting the string is the guess that
+    # mints a third identity joining to nothing.
     parser.add_argument("--run-id", type=str, required=True)
     parser.add_argument("--job-id", type=str, default="0")
     parser.add_argument("--pr-number", type=str, default="0")
@@ -142,14 +148,6 @@ def parse_args() -> Any:
         "params.RUN_ID here and it is used VERBATIM -- re-hashing an already-hashed id "
         "mints a third identity that joins to nothing. Mutually exclusive with the "
         "derive-from-GHA path below.",
-    )
-    parser.add_argument(
-        "--gha-run-id",
-        type=str,
-        default=os.environ.get("GITHUB_RUN_ID", ""),
-        help="GitHub Actions run id. Used to DERIVE a v2 run_id when --v2-run-id is absent. "
-        "Distinct flags rather than sniffing the shape of one value: a numeric id and a "
-        "uuid must not be told apart by guessing.",
     )
     parser.add_argument(
         "--test-type",
@@ -551,7 +549,7 @@ def resolve_v2_run_id(args) -> str:
             log.warning("--v2-run-id %r is not a uuid; v2 rows skipped", verbatim)
             return ""
         return verbatim
-    gha = (getattr(args, "gha_run_id", "") or "").strip()
+    gha = (getattr(args, "run_id", "") or "").strip()
     if not gha:
         return ""
     return v2_run_id("gha", gha, args.arch, getattr(args, "test_type", "perf"))
@@ -857,7 +855,7 @@ def insert_to_clickhouse(
         # Loud: without a run_id the perf numbers cannot reach an artifact, and a blank
         # artifact page reads as "no perf ran" rather than "not linked".
         log.warning(
-            "no v2 run_id (pass --v2-run-id on Jenkins, or --gha-run-id + --arch on Actions) "
+            "no v2 run_id (pass --v2-run-id on Jenkins, or --run-id + --arch on Actions) "
             "— upstream-shaped rows skipped, %s still written",
             RESULTS_TABLE,
         )
