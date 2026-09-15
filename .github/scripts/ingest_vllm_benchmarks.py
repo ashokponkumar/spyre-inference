@@ -125,13 +125,19 @@ def parse_args() -> Any:
     parser.add_argument("--workflow", type=str, default="vLLM Benchmark")
     parser.add_argument("--branch", type=str, required=True)
     parser.add_argument("--sha", type=str, required=True)
-    # THE run id for this leg, in two roles: upstream's `workflow_id` column, and the
-    # external_run_id half of the derived v2 run_id. One flag, because on every caller they are
-    # the same value -- a second --gha-run-id carrying the identical thing bought only a name to
-    # get wrong. The uuid form lives in --v2-run-id, which is a different TYPE and so stays a
-    # separate flag: telling a numeric id from a uuid by inspecting the string is the guess that
-    # mints a third identity joining to nothing.
-    parser.add_argument("--run-id", type=str, required=True)
+    # --run-id is THIS RUN'S IDENTITY, and on the Jenkins path that is the orchestrator's uuid,
+    # used verbatim. Named for what a CALLER means by "the run id" rather than for what one
+    # column needs: spyre-frameworks' ingest_cmd already passes ${RUN_ID} (a uuid) here, so this
+    # naming makes the cross-repo caller correct without it having to know our column layout.
+    # The numeric GitHub run id is --gha-run-id, below, because it is GHA-specific and only
+    # in-repo workflows have one.
+    # Not required: a Jenkins standalone run may have neither, and the v2 write is then skipped
+    # rather than landing an unjoinable row.
+    parser.add_argument("--run-id", type=str, default="")
+    # The numeric GitHub Actions run id -> upstream's workflow_id (Int64) and, when --run-id
+    # carries no uuid, the external_run_id half of a DERIVED v2 run_id. GHA-only by nature:
+    # only an in-repo workflow has a github.run_id, and a Jenkins leg legitimately has none.
+    parser.add_argument("--gha-run-id", type=str, default=os.environ.get("GITHUB_RUN_ID", ""))
     parser.add_argument("--job-id", type=str, default="0")
     parser.add_argument("--pr-number", type=str, default="0")
     parser.add_argument(
@@ -533,6 +539,31 @@ def to_vllm_v3_rows(rows: list[dict[str, Any]], run_id: str) -> list[dict[str, A
     return out
 
 
+def _is_uuid(value) -> bool:
+    try:
+        uuid.UUID((value or "").strip())
+    except (ValueError, AttributeError, TypeError):
+        return False
+    return True
+
+
+def effective_rpm_lock(args) -> str:
+    """The lock path to use, or "" to skip the RPM->artifact link.
+
+    The link belongs to the DERIVED (Actions) path alone. A UUID in --run-id or --v2-run-id
+    means Jenkins dispatched this leg and the orchestrator has already written an
+    artifact_results row for that run_id, so linking again would add one row per pinned RPM on
+    top of it -- and the writer's dedup guard cannot catch that, since it only skips when a row
+    is ALREADY present, making the outcome depend on which writer lands first.
+
+    Keyed on a UUID, not on a value merely being present: a NUMERIC --run-id is the old GHA
+    wiring, which does own the link.
+    """
+    if _is_uuid(getattr(args, "run_id", "")) or _is_uuid(getattr(args, "v2_run_id", "")):
+        return ""
+    return getattr(args, "rpm_lock", "")
+
+
 def resolve_v2_run_id(args) -> str:
     """The v2 run_id for this leg, or "" when it cannot be derived.
 
@@ -541,15 +572,23 @@ def resolve_v2_run_id(args) -> str:
     derived from (gha, run id, arch, test_type). Empty means the v2 write is skipped rather
     than writing an unjoinable row, which downstream cannot tell apart from "no perf ran".
     """
-    verbatim = (getattr(args, "v2_run_id", "") or "").strip()
+    # --run-id first, then --v2-run-id: the latter is kept only so a caller already passing it
+    # keeps working. Both mean the same thing -- an already-derived uuid, used verbatim.
+    verbatim = (getattr(args, "run_id", "") or "").strip() or (
+        getattr(args, "v2_run_id", "") or ""
+    ).strip()
     if verbatim:
         try:
             uuid.UUID(verbatim)
         except (ValueError, AttributeError, TypeError):
-            log.warning("--v2-run-id %r is not a uuid; v2 rows skipped", verbatim)
+            # A numeric value here is the old wiring (GitHub's run id in --run-id). Fall through
+            # to the derive path rather than skipping: that is what the caller meant.
+            if verbatim.isdigit():
+                return v2_run_id("gha", verbatim, args.arch, getattr(args, "test_type", "perf"))
+            log.warning("--run-id %r is neither a uuid nor numeric; v2 rows skipped", verbatim)
             return ""
         return verbatim
-    gha = (getattr(args, "run_id", "") or "").strip()
+    gha = (getattr(args, "gha_run_id", "") or "").strip()
     if not gha:
         return ""
     return v2_run_id("gha", gha, args.arch, getattr(args, "test_type", "perf"))
@@ -900,7 +939,9 @@ def main() -> None:
         results_dir=args.results_dir,
         branch=args.branch,
         sha=args.sha,
-        run_id=args.run_id,
+        # workflow_id's source: the NUMERIC id. --run-id may hold a uuid (Jenkins), which
+        # int()s to 0 and would blank run_url and collapse run_metadata's dedup key.
+        run_id=args.gha_run_id,
         job_id=args.job_id,
         workflow=args.workflow,
         pr_number=pr_number,
@@ -927,7 +968,7 @@ def main() -> None:
     # lands first wins and the other duplicates -- order-dependent, and every per-artifact
     # counter is derived from these rows. Passing an empty lock path reuses the documented
     # "empty disables the link" contract rather than adding a second flag.
-    _lock = "" if (getattr(args, "v2_run_id", "") or "").strip() else getattr(args, "rpm_lock", "")
+    _lock = effective_rpm_lock(args)
     insert_to_clickhouse(rows, resolve_v2_run_id(args), _lock, args.arch)
 
 

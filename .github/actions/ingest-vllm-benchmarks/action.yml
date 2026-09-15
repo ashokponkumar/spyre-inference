@@ -152,7 +152,7 @@ runs:
           --workflow "${{ inputs.workflow }}" \
           --branch "${{ inputs.branch }}" \
           --sha "${{ inputs.sha }}" \
-          --run-id "${{ inputs.run-id }}" \
+          --gha-run-id "${{ inputs.run-id }}" \
           --job-id "${{ inputs.job-id }}" \
           --pr-number "${{ inputs.pr-number }}" \
           --arch "${{ inputs.arch }}" \

@@ -202,6 +202,60 @@ def test_every_id_is_a_uuid_not_a_delimited_string(mod, tmp_path):
         assert "|" not in got
 
 
+# ── which flag carries which id ────────────────────────────────────────────────
+#
+# --run-id is THIS RUN'S IDENTITY (a uuid on the Jenkins path, used verbatim); --gha-run-id is
+# GitHub's NUMERIC run id, which becomes upstream's workflow_id and derives a v2 run_id when no
+# uuid was supplied. Named that way so spyre-frameworks' ingest_cmd -- which already passes
+# ${RUN_ID}, a uuid, as --run-id -- is correct without knowing this script's column layout.
+
+
+def _args(mod, **kw):
+    import argparse
+
+    base = dict(run_id="", gha_run_id="", v2_run_id="", arch="amd64", test_type="perf", rpm_lock="")
+    base.update(kw)
+    return argparse.Namespace(**base)
+
+
+def test_uuid_in_run_id_is_used_verbatim(mod):
+    """The cross-repo caller's shape. Re-hashing an already-hashed id would mint a third
+    identity that joins to nothing -- the v1 failure this whole scheme exists to avoid."""
+    u = "dab2a67f-14bf-53be-b6e4-fc9642086e47"
+    assert mod.resolve_v2_run_id(_args(mod, run_id=u)) == u
+
+
+def test_numeric_gha_run_id_derives(mod):
+    """The in-repo GHA shape: no uuid to hand over, so the id is derived from the run id."""
+    got = mod.resolve_v2_run_id(_args(mod, gha_run_id="34958223121"))
+    assert got == mod.v2_run_id("gha", "34958223121", "amd64", "perf")
+
+
+def test_uuid_wins_over_a_numeric_id(mod):
+    """Both present (a Jenkins-dispatched leg that also has a GHA run): the uuid is the
+    orchestrator's own identity, so it must win -- deriving instead would fork the join."""
+    u = "dab2a67f-14bf-53be-b6e4-fc9642086e47"
+    assert mod.resolve_v2_run_id(_args(mod, run_id=u, gha_run_id="34958223121")) == u
+
+
+def test_a_numeric_run_id_still_derives(mod):
+    """Back-compat: the OLD wiring put GitHub's numeric id in --run-id. Fall through to the
+    derive path rather than rejecting it -- that is what such a caller meant."""
+    got = mod.resolve_v2_run_id(_args(mod, run_id="34958223121"))
+    assert got == mod.v2_run_id("gha", "34958223121", "amd64", "perf")
+
+
+def test_legacy_v2_run_id_still_honoured(mod):
+    u = "dab2a67f-14bf-53be-b6e4-fc9642086e47"
+    assert mod.resolve_v2_run_id(_args(mod, v2_run_id=u)) == u
+
+
+def test_no_id_at_all_skips_the_v2_write(mod):
+    """'' rather than a minted id: an unjoinable row is indistinguishable downstream from
+    "no perf ran"."""
+    assert mod.resolve_v2_run_id(_args(mod)) == ""
+
+
 # ── the RPM->artifact link is the DERIVED path's alone ────────────────────────
 #
 # Jenkins passes --v2-run-id verbatim and the orchestrator has already written an
@@ -210,29 +264,61 @@ def test_every_id_is_a_uuid_not_a_delimited_string(mod, tmp_path):
 # is ALREADY present, so whichever writer lands first wins and the other duplicates.
 
 
-def _effective_lock(v2_run_id, rpm_lock="spyre-rpms.lock"):
-    """The gate expression from main(), kept in one place so the test pins the RULE."""
-    return "" if (v2_run_id or "").strip() else rpm_lock
+def test_workflow_id_comes_from_the_numeric_flag(mod):
+    """upstream's workflow_id is Int64 and built as `int(x) if x.isdigit() else 0`, so it must be
+    sourced from --gha-run-id. Taking it from --run-id would yield 0 on the Jenkins path, which
+    blanks run_url, collapses run_metadata's dedup key and hands the HUD a non-existent run.
+
+    Asserted against main()'s own wiring rather than a copy of it: the source line is read out of
+    the file, so re-pointing it at args.run_id fails here.
+    """
+    src = _SCRIPT.read_text(encoding="utf-8")
+    body = src[src.index("def main(") :]
+    assert "run_id=args.gha_run_id," in body, (
+        "extract_rows must take the NUMERIC id for workflow_id"
+    )
+    assert "run_id=args.run_id," not in body, (
+        "workflow_id must not be sourced from --run-id, which may hold a uuid"
+    )
 
 
-def test_jenkins_path_does_not_link_rpms():
-    """A verbatim v2-run-id means Jenkins owns the artifact_results row for this run."""
-    assert _effective_lock("dab2a67f-14bf-53be-b6e4-fc9642086e47") == ""
+def _lock_for(mod, **kw):
+    """Call the REAL gate (effective_rpm_lock), never a local reimplementation of it.
+
+    An earlier version of these tests re-derived the rule inline, so mutating the production
+    logic left them green -- they were testing the test.
+    """
+    return mod.effective_rpm_lock(_args(mod, **kw))
 
 
-def test_jenkins_path_ignores_a_lock_even_when_passed():
-    """The workflow passes --rpm-lock unconditionally, so the gate -- not the caller -- has to
-    be what stops the duplicate."""
-    assert _effective_lock("dab2a67f-14bf-53be-b6e4-fc9642086e47", "spyre-rpms.lock") == ""
+def test_jenkins_uuid_in_run_id_does_not_link_rpms(mod):
+    """The cross-repo caller's shape: Jenkins owns the artifact_results row for this run."""
+    assert (
+        _lock_for(mod, run_id="dab2a67f-14bf-53be-b6e4-fc9642086e47", rpm_lock="spyre-rpms.lock")
+        == ""
+    )
 
 
-def test_gha_path_links_rpms():
-    assert _effective_lock("") == "spyre-rpms.lock"
+def test_jenkins_uuid_in_legacy_flag_does_not_link_rpms(mod):
+    assert (
+        _lock_for(mod, v2_run_id="dab2a67f-14bf-53be-b6e4-fc9642086e47", rpm_lock="spyre-rpms.lock")
+        == ""
+    )
 
 
-def test_gha_path_honours_an_explicit_empty_lock():
+def test_gha_path_links_rpms(mod):
+    assert _lock_for(mod, gha_run_id="34958223121", rpm_lock="spyre-rpms.lock") == "spyre-rpms.lock"
+
+
+def test_a_numeric_run_id_still_links_rpms(mod):
+    """The old wiring put GitHub's numeric id in --run-id. That is a GHA leg, which DOES own
+    the link -- keying the gate on "any value present" would wrongly skip it."""
+    assert _lock_for(mod, run_id="34958223121", rpm_lock="spyre-rpms.lock") == "spyre-rpms.lock"
+
+
+def test_gha_path_honours_an_explicit_empty_lock(mod):
     """Empty stays the documented opt-out on the path that does own the link."""
-    assert _effective_lock("", "") == ""
+    assert _lock_for(mod, gha_run_id="34958223121", rpm_lock="") == ""
 
 
 def test_unknown_arch_yields_nothing(mod, tmp_path):
