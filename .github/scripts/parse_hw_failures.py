@@ -29,11 +29,12 @@ Please note:
 
 import argparse
 import json
-import regex as re
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+import regex as re
 
 # ----------------------------
 # Regex patterns
@@ -63,19 +64,16 @@ RE_RAS_LINE = re.compile(
 )
 
 # Also catch RuntimeError: {...RAS...} lines (Python traceback form)
-RE_RAS_RUNTIME_ERROR = re.compile(
-    r'RuntimeError:\s*(?P<blob>\{[^}]*"name"\s*:\s*"RAS::[^}]+\})'
-)
+RE_RAS_RUNTIME_ERROR = re.compile(r'RuntimeError:\s*(?P<blob>\{[^}]*"name"\s*:\s*"RAS::[^}]+\})')
 
 # Retry / stall signals
 RE_HW_RETRY_BANNER = re.compile(r"Hardware RAS timeout detected", re.IGNORECASE)
 RE_STALL_LINE = re.compile(r"\[stall-watcher\] No new output for (?P<secs>\d+)s")
 RE_SIGNAL_EXIT = re.compile(r"SIGNAL EXIT", re.IGNORECASE)
 
-# Matches the "(pod-level retry)" job-name suffix _test_matrix.yaml's test_retry / test_multi_spyre_retry jobs stamp on a suite re-run on a fresh pod; tolerates the parens already being stripped by the upstream sanitizer.
-RE_POD_LEVEL_RETRY_SUFFIX = re.compile(
-    r"\(?\s*pod-level retry\s*\)?\s*$", re.IGNORECASE
-)
+# Marks a suite re-run on a fresh pod. Parens are optional: the upstream
+# sanitizer may already have stripped them from the job name.
+RE_POD_LEVEL_RETRY_SUFFIX = re.compile(r"\(?\s*pod-level retry\s*\)?\s*$", re.IGNORECASE)
 
 # Process crash / signal patterns
 # Matches: "Signal Received: 6 (Aborted)" or "Signal Received: 11 (Segmentation fault)"
@@ -146,12 +144,8 @@ _SIGNAL_NAMES = {
 # in-place with a literal "***" (e.g. a pod name containing a token that
 # happens to match a registered secret), so real values can legitimately
 # contain it -- excluding it would truncate the value at the mask.
-RE_NODE_NAME = re.compile(
-    r"GHA_RUNNER_POD_NODE_NAME(?!\w)[ \t]*(?:->|=)?[ \t]*(?P<v>[\w.*-]+)"
-)
-RE_POD_NAME = re.compile(
-    r"GHA_RUNNER_POD_NAME(?!\w)[ \t]*(?:->|=)?[ \t]*(?P<v>[\w.*-]+)"
-)
+RE_NODE_NAME = re.compile(r"GHA_RUNNER_POD_NODE_NAME(?!\w)[ \t]*(?:->|=)?[ \t]*(?P<v>[\w.*-]+)")
+RE_POD_NAME = re.compile(r"GHA_RUNNER_POD_NAME(?!\w)[ \t]*(?:->|=)?[ \t]*(?P<v>[\w.*-]+)")
 # gather-runner-info's own script preview -- `echo "PCIDEVICE_IBM_COM_AIU_PF
 # ${PCIDEVICE_IBM_COM_AIU_PF:-}"` -- references the var name TWICE on one
 # line. The first occurrence is followed by `$` (rejected, not in the value
@@ -166,21 +160,15 @@ RE_PCI_DEVICE = re.compile(
 RE_AIU_RANK0 = re.compile(
     r"AIU_WORLD_RANK_0(?!\w)[ \t]*(?:->|=)?[ \t]*(?P<v>[0-9a-fA-F][0-9a-fA-F:.,]*)"
 )
-RE_PCI_DEV_ID = re.compile(
-    r"pcidevid\.cpp.*?Device id \(for card idx \d+\):\s*(?P<v>[0-9a-f:.]+)"
-)
+RE_PCI_DEV_ID = re.compile(r"pcidevid\.cpp.*?Device id \(for card idx \d+\):\s*(?P<v>[0-9a-f:.]+)")
 RE_OPENED = re.compile(r"Opened:\s*SEN:VFIO:TYPE1:(?P<v>[0-9a-f:.]+)")
 
 # Chip identifiers (also final-attempt only)
 # vfio_hal_mnt.cpp prints the first ECID word with a doubled prefix
 # ("Raw ECID = 0x0x0000000002038000 0x03e3..."), so `0x` must be repeatable —
 # a single-`0x` pattern matches nothing at all.
-RE_RAW_ECID = re.compile(
-    r"Raw ECID\s*=\s*(?P<v>(?:0x)+[0-9a-fA-F]+\s+(?:0x)+[0-9a-fA-F]+)"
-)
-RE_CHIP_COORDS = re.compile(
-    r"CHIPY=(?P<chipy>0x[0-9a-fA-F]+)\s+CHIPX=(?P<chipx>0x[0-9a-fA-F]+)"
-)
+RE_RAW_ECID = re.compile(r"Raw ECID\s*=\s*(?P<v>(?:0x)+[0-9a-fA-F]+\s+(?:0x)+[0-9a-fA-F]+)")
+RE_CHIP_COORDS = re.compile(r"CHIPY=(?P<chipy>0x[0-9a-fA-F]+)\s+CHIPX=(?P<chipx>0x[0-9a-fA-F]+)")
 RE_WAFER_ID = re.compile(r"Mfg WaferID\s*=\s*(?P<v>\S+)")
 RE_MFG_XY = re.compile(r"Mfg \(X,Y\)\s*=\s*\((?P<x>\d+),(?P<y>\d+)\)")
 RE_CARD_SERIAL = re.compile(r"Card 11S S/N\s*=\s*(?P<v>\S+)")
@@ -317,9 +305,7 @@ def _extract_crash_detail(chunk_lines: list[str], chunk: str) -> dict | None:
     if heap_m:
         detail["error_message"] = heap_m.group(0).strip()
     elif sig_m:
-        detail["error_message"] = (
-            f"Signal {detail['signal_number']} ({detail['signal_name']})"
-        )
+        detail["error_message"] = f"Signal {detail['signal_number']} ({detail['signal_name']})"
 
     # Collect backtrace frames (first 10 unique library paths)
     frames = []
@@ -377,10 +363,7 @@ def _extract_all_ras_events(chunk_lines: list[str]) -> list[dict]:
         try:
             parsed = json.loads(blob_str)
             event.update(
-                {
-                    k: _clean(str(v)) if isinstance(v, str) else str(v)
-                    for k, v in parsed.items()
-                }
+                {k: _clean(str(v)) if isinstance(v, str) else str(v) for k, v in parsed.items()}
             )
         except json.JSONDecodeError:
             # Partial parse: pull out fields individually
@@ -464,7 +447,7 @@ def parse_log(
             "attempt": attempt_num,
             "total_attempts": total_attempts,
             "pod_level_retry": is_pod_level_retry,
-            "ingested_at": datetime.now(timezone.utc).isoformat(),
+            "ingested_at": datetime.now(UTC).isoformat(),
             # Outcome
             "outcome": "unknown",
             "exit_code": None,
@@ -552,9 +535,7 @@ def parse_log(
 
         # -------------------- Retry trigger ------------------------
         for line in chunk_lines:
-            if "-->" in line and (
-                "retry" in line.lower() or "detected" in line.lower()
-            ):
+            if "-->" in line and ("retry" in line.lower() or "detected" in line.lower()):
                 rec["retry_trigger"] = _clean(line)
                 break
 
@@ -581,9 +562,7 @@ def parse_log(
             rec["failure_reason"] = _ras_name_to_reason(rec["ras_name"])
             # failure_reason_detail: the full parsed primary RAS event as a dict,
             # with timestamp and raw blob removed to keep it clean.
-            detail = {
-                k: v for k, v in ras_events[0].items() if k not in ("timestamp", "raw")
-            }
+            detail = {k: v for k, v in ras_events[0].items() if k not in ("timestamp", "raw")}
             rec["failure_reason_detail"] = detail
         elif crash_detail and rec["outcome"] == "failed":
             rec["failure_reason"] = "process_crash"
@@ -619,9 +598,7 @@ def parse_log(
         # Prefer the k8s node name; fall back to the runner pod name when the
         # node name env var isn't populated (e.g. some clusters only expose
         # GHA_RUNNER_POD_NAME via the downward API, not the node name).
-        rec["node_name"] = _first_env(RE_NODE_NAME, text) or _first_env(
-            RE_POD_NAME, text
-        )
+        rec["node_name"] = _first_env(RE_NODE_NAME, text) or _first_env(RE_POD_NAME, text)
         rec["pci_device"] = (
             _first_env(RE_PCI_DEVICE, text)
             or _first_env(RE_PCI_DEV_ID, chunk)
@@ -662,11 +639,7 @@ def parse_log(
                     rec["tests_error"] = int(me.group("n"))
 
         # ---------------------------- Stall info ----------------------------
-        stall_secs = [
-            int(m2["secs"])
-            for line in chunk_lines
-            if (m2 := RE_STALL_LINE.search(line))
-        ]
+        stall_secs = [int(m2["secs"]) for line in chunk_lines if (m2 := RE_STALL_LINE.search(line))]
         rec["stall_max_secs"] = max(stall_secs, default=0)
 
         records.append(rec)
@@ -855,9 +828,7 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Output compact JSON (no indentation). Smaller files, faster ingest.",
     )
-    p.add_argument(
-        "--out", metavar="FILE", help="Write JSON output to FILE instead of stdout."
-    )
+    p.add_argument("--out", metavar="FILE", help="Write JSON output to FILE instead of stdout.")
     return p
 
 
@@ -893,9 +864,7 @@ def main() -> None:
             )
             all_records.extend(recs)
             outcomes = [r["outcome"] for r in recs]
-            reasons = [
-                r["failure_reason"] for r in recs if r["failure_reason"] != "none"
-            ]
+            reasons = [r["failure_reason"] for r in recs if r["failure_reason"] != "none"]
             print(
                 f"[info]  {fpath.name}",
                 file=sys.stderr,
@@ -916,9 +885,7 @@ def main() -> None:
         all_records = parse_log(text, run_id=args.run_id, suite_hint=args.suite)
 
     else:
-        print(
-            "[error] Provide --log-file, --log-dir, or pipe via stdin.", file=sys.stderr
-        )
+        print("[error] Provide --log-file, --log-dir, or pipe via stdin.", file=sys.stderr)
         sys.exit(1)
 
     # Summary to stderr

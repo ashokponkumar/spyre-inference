@@ -18,8 +18,9 @@ import argparse
 import json
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
+
 import clickhouse_connect
 
 # ---------------------------------------------------------------------------
@@ -100,8 +101,7 @@ def build_row(rec: dict, args) -> list:
         _int(rec.get("attempt"), 1),
         _int(rec.get("total_attempts"), 1),
         _int(rec.get("pod_level_retry"), 0),
-        _parse_ts(rec.get("ingested_at"))
-        or datetime.now(timezone.utc).replace(tzinfo=None),
+        _parse_ts(rec.get("ingested_at")) or datetime.now(UTC).replace(tzinfo=None),
         # ── Outcome ───────────────────────────────────────────────────────
         _str(rec.get("outcome"), "unknown"),
         rec.get("exit_code"),  # Nullable(Int32) — keep None
@@ -235,14 +235,13 @@ def ensure_extra_columns(client) -> None:
         ("ras_severity", "LowCardinality(String) DEFAULT ''"),
         ("ras_message", "String DEFAULT ''"),
         ("ras_events_json", "String DEFAULT '[]'"),
-        # True when this row came from a _test_matrix.yaml pod-level-retry job (a fresh-pod re-run), not the original job.
+        # True for a fresh-pod re-run row, false for the original job's row.
         ("pod_level_retry", "Bool DEFAULT false"),
     ]
     for col_name, col_type in extras:
         try:
             client.command(
-                f"ALTER TABLE hw_failure_diagnostics "
-                f"ADD COLUMN IF NOT EXISTS {col_name} {col_type}"
+                f"ALTER TABLE hw_failure_diagnostics ADD COLUMN IF NOT EXISTS {col_name} {col_type}"
             )
         except Exception as exc:
             # Non-fatal: log and continue (column may already exist with right type)
