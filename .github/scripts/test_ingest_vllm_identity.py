@@ -202,6 +202,39 @@ def test_every_id_is_a_uuid_not_a_delimited_string(mod, tmp_path):
         assert "|" not in got
 
 
+# ── the RPM->artifact link is the DERIVED path's alone ────────────────────────
+#
+# Jenkins passes --v2-run-id verbatim and the orchestrator has already written an
+# artifact_results row for that run_id, so linking again would add one row per pinned RPM on
+# top of it. The dedup guard inside the writer cannot catch that -- it only skips when a row
+# is ALREADY present, so whichever writer lands first wins and the other duplicates.
+
+
+def _effective_lock(v2_run_id, rpm_lock="spyre-rpms.lock"):
+    """The gate expression from main(), kept in one place so the test pins the RULE."""
+    return "" if (v2_run_id or "").strip() else rpm_lock
+
+
+def test_jenkins_path_does_not_link_rpms():
+    """A verbatim v2-run-id means Jenkins owns the artifact_results row for this run."""
+    assert _effective_lock("dab2a67f-14bf-53be-b6e4-fc9642086e47") == ""
+
+
+def test_jenkins_path_ignores_a_lock_even_when_passed():
+    """The workflow passes --rpm-lock unconditionally, so the gate -- not the caller -- has to
+    be what stops the duplicate."""
+    assert _effective_lock("dab2a67f-14bf-53be-b6e4-fc9642086e47", "spyre-rpms.lock") == ""
+
+
+def test_gha_path_links_rpms():
+    assert _effective_lock("") == "spyre-rpms.lock"
+
+
+def test_gha_path_honours_an_explicit_empty_lock():
+    """Empty stays the documented opt-out on the path that does own the link."""
+    assert _effective_lock("", "") == ""
+
+
 def test_unknown_arch_yields_nothing(mod, tmp_path):
     path = _lock(tmp_path, "ibm-flex-1.2.3-0.next.abc123def456.el10.x86_64.rpm")
     assert mod.rpm_artifact_ids(path, "") == []

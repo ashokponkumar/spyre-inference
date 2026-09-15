@@ -921,7 +921,16 @@ def main() -> None:
             print(f"... and {len(rows) - 5} more")
         return
 
-    insert_to_clickhouse(rows, resolve_v2_run_id(args), getattr(args, "rpm_lock", ""), args.arch)
+    # The RPM->artifact link belongs to the DERIVED path only. A Jenkins-launched leg passes
+    # --v2-run-id verbatim and the orchestrator has already written an artifact_results row for
+    # that same run_id (pushArtifactResult, result_kind='performance'), so linking again here
+    # would add one row per pinned RPM on top of it. The existing dedup guard does not catch
+    # that: it only skips when a row for the run_id is ALREADY present, so whichever writer
+    # lands first wins and the other duplicates -- order-dependent, and every per-artifact
+    # counter is derived from these rows. Passing an empty lock path reuses the documented
+    # "empty disables the link" contract rather than adding a second flag.
+    _lock = "" if (getattr(args, "v2_run_id", "") or "").strip() else getattr(args, "rpm_lock", "")
+    insert_to_clickhouse(rows, resolve_v2_run_id(args), _lock, args.arch)
 
 
 if __name__ == "__main__":

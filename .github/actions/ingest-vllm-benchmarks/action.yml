@@ -57,9 +57,12 @@ inputs:
     default: perf
   rpm-lock:
     description: >-
-      Path to spyre-rpms.lock. On Actions this file IS the identity of the stack under test
-      (the leg restores a cache keyed on it and builds nothing), so each pinned RPM's
-      artifact_id is derived from it and linked to this run. Empty disables the link.
+      Path to spyre-rpms.lock, used ONLY on a direct Actions run. Such a leg has no built
+      image to point at -- it restores a cache keyed on this file and builds nothing -- so the
+      file IS the identity of the stack under test, and each pinned RPM's artifact_id is
+      derived from it and linked to this run. IGNORED when v2-run-id is set: that is the
+      Jenkins path, where the orchestrator has already written the artifact_results row for
+      the same run_id and linking again would duplicate it. Empty also disables the link.
     required: false
     default: spyre-rpms.lock
   clickhouse-host:
