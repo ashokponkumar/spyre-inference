@@ -481,6 +481,9 @@ def v2_source_and_external_run_id(args, run_id: str):
     neither side has to thread a minted uuid.
     `source` is required precisely because a GHA run id and a Jenkins build number
     share a number space.
+
+    Only reached when no THREADED uuid was supplied -- see v2_run_id_for(), which prefers
+    --run-id and leaves this as the coordinate-hashing fallback.
     """
     gha = (getattr(args, "gha_run_id", "") or "").strip()
     if gha:
@@ -495,6 +498,26 @@ def v2_source_and_external_run_id(args, run_id: str):
     # No CI coordinate at all: fall back to the run uuid so the rows are still
     # self-consistent and joinable WITHIN this ingest, just not to an artifact.
     return "local", run_id
+
+
+def v2_run_id_for(args, run_id: str, arch: str, tier: str) -> str:
+    """The v2 run_id for this leg: the THREADED uuid when there is one, else a derived hash.
+
+    A uuid minted above the CI split (the orchestrator's newRunId(), arriving as --run-id) is
+    the same value the Jenkins-side artifact_results writer records, so honouring it verbatim
+    makes the two tables join on one identity -- with no agreement needed on a coordinate
+    string's format, case, or arch folding.
+
+    Not folded with arch/tier: one ingest invocation carries exactly one --trigger-type, so a
+    multi-tier leg ingests once per tier and no row stands for two.
+
+    Falls back to the coordinate hash for a run with no threaded uuid (a GHA-initiated run).
+    """
+    threaded = _threaded_run_id(args)
+    if threaded:
+        return threaded
+    source, external = v2_source_and_external_run_id(args, run_id)
+    return v2_run_id(source, external, arch, tier)
 
 
 def v2_tables_present(client, db: str) -> bool:
@@ -762,7 +785,7 @@ def main():
                 _v2_source, _v2_ext = v2_source_and_external_run_id(args, run_id)
                 _v2_tier = (getattr(args, "trigger_type", "") or "").strip()
                 _v2_arch = (args.platform or run.get("platform") or "").strip()
-                _v2_run_id = v2_run_id(_v2_source, _v2_ext, _v2_arch, _v2_tier)
+                _v2_run_id = v2_run_id_for(args, run_id, _v2_arch, _v2_tier)
                 if not _v2_run_id:
                     # Loud, because a blank run_id means these cases reach v2 unjoinable
                     # to any artifact -- and that reads downstream as "no tests ran".

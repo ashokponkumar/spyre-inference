@@ -29,6 +29,15 @@ on:
         required: false
         type: boolean
         default: true
+      run_id:
+        description: >
+          UUID identifying this TEST RUN, threaded from the dispatching orchestrator. Uploaded
+          as the "run-id" artifact below so push-to-clickhouse.yaml -- which runs on
+          workflow_run AFTER this workflow and therefore cannot receive a dispatch input -- can
+          recover it and stamp test_case_runs with the same id artifact_results carries.
+        required: false
+        type: string
+        default: ''
       use_prebaked_image:
         # Skips only the "Install Spyre RPMs" step (the spyre-rpm-install
         # action). It does not change the override step or any other step.
@@ -171,6 +180,24 @@ jobs:
           # vocabulary is the Makefile.
           RESOLVED_TEST_TYPE="$(make -s print-test-type TEST_TYPE="${RAW_TEST_TYPE}")"
           echo "resolved_test_type=${RESOLVED_TEST_TYPE}" >> "$GITHUB_OUTPUT"
+
+      # The threaded run_id has to reach push-to-clickhouse.yaml, which runs on workflow_run
+      # AFTER this workflow and so cannot take a dispatch input. An artifact is the channel that
+      # ingest ALREADY reads (it enumerates this run's artifacts to find the junit XML), so the
+      # uuid rides it rather than needing a new transport or a uuid in the run-name. Skipped when
+      # empty, so a GHA-initiated run uploads nothing and the ingest derives its own id.
+      - name: Record threaded run_id for the ingest
+        if: ${{ inputs.run_id != '' }}
+        env:
+          THREADED_RUN_ID: ${{ inputs.run_id }}
+        run: printf '%s' "${THREADED_RUN_ID}" > run-id.txt
+      - name: Upload threaded run_id
+        if: ${{ inputs.run_id != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: run-id
+          path: run-id.txt
+          retention-days: 1
 
   # Pin the test-durations artifact this run's shard jobs weight their partition
   # by: one run id resolved once, so every shard of a suite reads identical

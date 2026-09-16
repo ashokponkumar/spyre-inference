@@ -243,6 +243,26 @@ jobs:
       # ingest_xml_si.py (checked out above), into
       # si_test_runs / si_test_cases / si_run_properties.
       # ---------------------------------------------------------------------------
+      # The orchestrator's uuid, uploaded by _test_matrix as the "run-id" artifact (this
+      # workflow runs on workflow_run, so it cannot receive it as a dispatch input). Absent on a
+      # GHA-initiated run => empty => the ingest derives its own id from the run coordinate.
+      - name: Recover threaded run_id
+        id: threaded-run-id
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RID=""
+          AID=$(gh api --paginate \
+            "/repos/${{ github.repository }}/actions/runs/${TRIGGERING_RUN_ID}/artifacts?per_page=100" \
+            --jq '.artifacts[] | select(.name == "run-id") | .id' | head -1)
+          if [[ -n "${AID}" ]]; then
+            gh api "/repos/${{ github.repository }}/actions/artifacts/${AID}/zip" > run-id.zip || true
+            unzip -o -q run-id.zip -d run-id-dir || true
+            RID=$(tr -d '[:space:]' < run-id-dir/run-id.txt 2>/dev/null || echo "")
+          fi
+          echo "Threaded run_id: ${RID:-<none, ingest will derive>}"
+          echo "run_id=${RID}" >> "${GITHUB_OUTPUT}"
+
       - name: Ingest XML files into ClickHouse
         run: |
           source .venv/bin/activate
@@ -252,6 +272,7 @@ jobs:
             --branch   "${TRIGGERING_BRANCH}" \
             --sha      "${TRIGGERING_SHA}" \
             --gha-run-id "${TRIGGERING_RUN_ID}" \
+            --run-id "${{ steps.threaded-run-id.outputs.run_id }}" \
             --triggered-at "${TRIGGERING_AT}" \
             --pr-number    "${{ steps.resolve-pr.outputs.pr_number }}" \
             --trigger-type "${{ steps.extract-tier.outputs.tier }}" \
