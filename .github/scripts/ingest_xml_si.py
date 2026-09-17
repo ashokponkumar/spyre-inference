@@ -375,10 +375,12 @@ def main():
     parser.add_argument(
         "--platform",
         default=_platform.machine() or "",
-        help="Hardware platform the suite ran on, e.g. x86_64 | s390x | ppc64le. "
-        "Defaults to the ingest host's arch, which is the machine the suite ran on. NOT "
-        "optional for v2: arch is an input to the run_id hash, so an empty value makes "
-        "v2_run_id refuse to derive an id and every row lands unjoinable.",
+        help="Hardware platform the SUITE ran on, e.g. x86_64 | s390x | ppc64le. Folded into "
+        "the run_id hash, so a wrong value mints an id that joins to nothing: pass it "
+        "explicitly whenever the ingest does not run on the test host (the workflow_run "
+        "ingest does not -- it is pinned to x86_64). The default is the INGEST host's arch, "
+        "correct only for a direct run. An empty value makes v2_run_id refuse to derive an "
+        "id, so every row lands unjoinable.",
     )
     parser.add_argument(
         "--img-digest",

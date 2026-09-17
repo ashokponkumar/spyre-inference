@@ -264,6 +264,12 @@ jobs:
           echo "run_id=${RID}" >> "${GITHUB_OUTPUT}"
 
       - name: Ingest XML files into ClickHouse
+        env:
+          # The arch the SUITE ran on, not this job's: arch is a run_id hash input and
+          # this job is pinned to x86_64, so `uname -m` would stamp x86_64 on every leg
+          # it ingests. All test legs are x86_64 today; this needs to become a per-leg
+          # value (carried like the run-id artifact) before a non-x86 leg is added.
+          LEG_ARCH: x86_64
         run: |
           source .venv/bin/activate
           python3 .github/scripts/ingest_xml_si.py \
@@ -276,7 +282,7 @@ jobs:
             --triggered-at "${TRIGGERING_AT}" \
             --pr-number    "${{ steps.resolve-pr.outputs.pr_number }}" \
             --trigger-type "${{ steps.extract-tier.outputs.tier }}" \
-            --platform "$(uname -m)"
+            --platform "${LEG_ARCH}"
 
       - name: Summary
         if: always()
