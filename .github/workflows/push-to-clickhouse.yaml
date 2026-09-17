@@ -95,10 +95,6 @@ jobs:
         with:
           sparse-checkout: |
             .github/scripts/ingest_xml_si.py
-            # v2_schema.py is imported as a sibling module, so it must be checked out too --
-            # a sparse checkout listing only the entry point makes `import v2_schema` fail at
-            # startup, which is exactly what it did on hf-adapters after the v2 merge.
-            .github/scripts/v2_schema.py
           sparse-checkout-cone-mode: false
 
       - name: Install uv
@@ -114,6 +110,10 @@ jobs:
         run: |
           source .venv/bin/activate
           uv pip install requests clickhouse-driver clickhouse-connect lxml regex
+          # The v2 schema and write path live in torch-spyre's extensions/ so all three
+          # product repos share ONE definition of run_id and test_case_id.
+          uv pip install \
+            "git+https://github.com/torch-spyre/torch-spyre@main#subdirectory=extensions/clickhouse-ingest"
 
       - name: Install gh CLI
         env:

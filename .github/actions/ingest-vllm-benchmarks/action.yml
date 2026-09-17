@@ -127,6 +127,9 @@ runs:
         uv venv "${RUNNER_TEMP}/ingest-venv"
         source "${RUNNER_TEMP}/ingest-venv/bin/activate"
         uv pip install clickhouse-connect
+        # Shared v2 identity (run_id / benchmark_id namespace) lives in torch-spyre.
+        uv pip install \
+          "git+https://github.com/torch-spyre/torch-spyre@main#subdirectory=extensions/clickhouse-ingest"
 
     - name: Ingest benchmark results into ClickHouse
       if: steps.gate.outputs.configured == 'true'

@@ -324,3 +324,14 @@ def test_gha_path_honours_an_explicit_empty_lock(mod):
 def test_unknown_arch_yields_nothing(mod, tmp_path):
     path = _lock(tmp_path, "ibm-flex-1.2.3-0.next.abc123def456.el10.x86_64.rpm")
     assert mod.rpm_artifact_ids(path, "") == []
+
+
+def test_identity_comes_from_the_shared_library_not_a_local_copy(mod):
+    # The golden constants above pin the VALUES; this pins the SOURCE. A local redefinition
+    # that agrees today satisfies every assertion in this file while drifting later, so assert
+    # object identity: editing the library must change what this writer executes.
+    import spyre_clickhouse_ingest as lib
+
+    for name in ("v2_canonical_arch", "v2_run_id"):
+        assert getattr(mod, name) is getattr(lib, name), name
+    assert mod.V2_NAMESPACE is lib.V2_NAMESPACE

@@ -32,6 +32,7 @@ from argparse import ArgumentParser
 from typing import Any
 
 import clickhouse_connect
+from spyre_clickhouse_ingest import V2_NAMESPACE, v2_canonical_arch, v2_run_id
 from utils import read_benchmark_results
 
 logging.basicConfig(level=logging.INFO)
@@ -42,47 +43,12 @@ RESULTS_TABLE = "results_v3"
 # Written ALONGSIDE results_v3, never instead of it: the HUD reads the flat table today.
 VLLM_V3_TABLE = "vllm_results_v3"
 
-# uuid5 namespace for v2 run identity. Must match the frameworks writers byte for byte --
-# a different namespace mints a run_id that joins to nothing.
-V2_NAMESPACE = uuid.UUID("cb0af9bf-2858-5eab-9211-f51190531bf3")
-
 
 def _v2_norm(value) -> str:
     """Canonical scalar form for every hash input. Lowercasing is not cosmetic: the same
     tier arrives as 'Regression' from a Jenkins parameter and 'regression' from a GHA
     input, and any writer that skips it mints a different id for the same thing."""
     return ("" if value is None else str(value)).strip().lower()
-
-
-def v2_canonical_arch(arch) -> str:
-    """amd64/x86/x86-64 all fold to x86_64. Folded INSIDE the hash, so both spellings of one
-    machine produce ONE run_id -- otherwise the same run lands twice, unjoinable to each
-    other. The alias list and the lowercasing must match the other writers exactly
-    (ingest_xml.py v2_canonical_arch, pushToClickhouse.groovy): 'AMD64' or 'x86-64' folding
-    here but not there is a silently unjoinable run."""
-    a = _v2_norm(arch)
-    return "x86_64" if a in ("amd64", "x86", "x86-64", "x86_64") else a
-
-
-def v2_run_id(source: str, external_run_id: str, arch: str, test_type: str) -> str:
-    """uuid5 over source|external_run_id|arch|test_type. Empty on incomplete input:
-    a partial key would collide every such run onto one id."""
-    fields = (source, external_run_id, arch, test_type)
-    if not all(_v2_norm(f) for f in fields):
-        return ""
-    return str(
-        uuid.uuid5(
-            V2_NAMESPACE,
-            "|".join(
-                (
-                    _v2_norm(source),
-                    _v2_norm(external_run_id),
-                    v2_canonical_arch(arch),
-                    _v2_norm(test_type),
-                )
-            ),
-        )
-    )
 
 
 def v2_artifact_id(component: str, artifact_name: str, id12: str, arch: str) -> str:
