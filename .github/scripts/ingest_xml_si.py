@@ -46,6 +46,7 @@ from spyre_clickhouse_ingest import (
     insert_v2,
     promote_xpass,
     v2_already_ingested,
+    v2_component,
     v2_database,
     v2_run_id_for,
     v2_source_and_external_run_id,
@@ -332,7 +333,7 @@ def _threaded_run_id(args) -> str:
 # The product this script ingests for. Replaces v1's hf_/si_ table-name prefixes: one
 # v2 table pair serves all three products, discriminated by this column. It is also a
 # test_case_id hash input, so it cannot drift from the identity it is stamped on.
-V2_COMPONENT = "spyre-inference"
+V2_COMPONENT_DEFAULT = "spyre-inference"
 
 
 def _v2_norm(value) -> str:
@@ -349,6 +350,13 @@ def main():
     parser.add_argument("--branch", default="")
     parser.add_argument("--sha", default="")
     parser.add_argument("--run-id", default="")
+    parser.add_argument(
+        "--component",
+        default="",
+        help="Component to stamp on v2 rows. Defaults to this repo's own product; set it "
+        "when a cell runs ANOTHER component's suite through this script, so the rows (and "
+        "the test_case_id they hash into) name the suite's real owner.",
+    )
     parser.add_argument("--gha-run-id", default="")
     parser.add_argument("--triggered-at", default="")
     parser.add_argument("--pr-number", default="")
@@ -504,6 +512,9 @@ def main():
                 _v2_tier = (getattr(args, "trigger_type", "") or "").strip()
                 _v2_arch = (args.platform or run.get("platform") or "").strip()
                 _v2_run_id = v2_run_id_for(args, run_id, _v2_arch, _v2_tier)
+                # Resolved once: the dedup probe and the insert must agree, since
+                # component hashes into test_case_id.
+                _v2_comp = v2_component(args, V2_COMPONENT_DEFAULT)
                 if not _v2_run_id:
                     # Loud, because a blank run_id means these cases reach v2 unjoinable
                     # to any artifact -- and that reads downstream as "no tests ran".
@@ -513,10 +524,10 @@ def main():
                         f"tier={_v2_tier!r}); --trigger-type is the field usually missing",
                         file=sys.stderr,
                     )
-                elif v2_already_ingested(client, v2db, _v2_run_id, V2_COMPONENT, xml_path.name):
+                elif v2_already_ingested(client, v2db, _v2_run_id, _v2_comp, xml_path.name):
                     print(f"  v2: already ingested run_id={_v2_run_id} — skipping")
                 else:
-                    _n = insert_v2(client, v2db, V2_COMPONENT, _v2_run_id, cases, xml_path.name)
+                    _n = insert_v2(client, v2db, _v2_comp, _v2_run_id, cases, xml_path.name)
                     print(f"  v2: {_n} test_case_runs under run_id={_v2_run_id}")
         except Exception as _v2_err:
             print(f"  [warn] v2 write failed, v1 unaffected: {_v2_err!r}", file=sys.stderr)
