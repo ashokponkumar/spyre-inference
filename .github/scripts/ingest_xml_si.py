@@ -342,6 +342,23 @@ def _v2_norm(value) -> str:
     return ("" if value is None else str(value)).strip().lower()
 
 
+def _leg_arch(xml_path: Path) -> str:
+    """The arch recorded beside this leg's XML by run-matrix-config, or "".
+
+    Per FILE, not per run: arch is hashed into run_id, and this ingest is pinned to x86_64, so one
+    run-wide value would mislabel every non-x86 leg into a colliding id.
+    """
+    sidecar = xml_path.with_name(xml_path.stem.replace("junit-", "leg-arch-") + ".txt")
+    for candidate in (sidecar, *sorted(xml_path.parent.glob("leg-arch-*.txt"))):
+        try:
+            arch = candidate.read_text().strip()
+        except OSError:
+            continue
+        if arch:
+            return arch
+    return ""
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--xml-dir", default=None)
@@ -512,7 +529,9 @@ def main():
             if v2db and v2_tables_present(client, v2db):
                 _v2_source, _v2_ext = v2_source_and_external_run_id(args, run_id)
                 _v2_tier = (getattr(args, "trigger_type", "") or "").strip()
-                _v2_arch = (args.platform or run.get("platform") or "").strip()
+                _v2_arch = (
+                    _leg_arch(xml_path) or args.platform or run.get("platform") or ""
+                ).strip()
                 _v2_run_id = v2_run_id_for(args, run_id, _v2_arch, _v2_tier)
                 # Resolved once: the dedup probe and the insert must agree, since
                 # component hashes into test_case_id.

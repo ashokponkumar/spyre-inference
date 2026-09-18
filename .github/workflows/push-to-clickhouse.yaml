@@ -265,10 +265,9 @@ jobs:
       # si_test_runs / si_test_cases / si_run_properties.
       - name: Ingest XML files into ClickHouse
         env:
-          # The arch the SUITE ran on, not this job's: arch is a run_id hash input and
-          # this job is pinned to x86_64, so `uname -m` would stamp x86_64 on every leg
-          # it ingests. All test legs are x86_64 today; this needs to become a per-leg
-          # value (carried like the run-id artifact) before a non-x86 leg is added.
+          # Fallback only: each leg uploads its own arch beside its JUnit XML, which the
+          # ingest prefers per file. Used when that sidecar is absent (a re-ingest of an
+          # older run), since arch is hashed into run_id and this job is pinned to x86_64.
           LEG_ARCH: x86_64
           # Routed through env rather than interpolated into the script: this job runs on
           # workflow_run, a privileged trigger, and the value comes from a downloaded artifact.

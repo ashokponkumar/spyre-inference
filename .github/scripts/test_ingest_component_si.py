@@ -85,3 +85,38 @@ def test_component_flag_is_declared():
     )
     assert out.returncode == 0, out.stderr
     assert "--component" in out.stdout
+
+
+def test_identity_goldens():
+    """Both halves of the identity contract, pinned locally.
+
+    The library is installed from torch-spyre@main, so these are the in-repo tripwire for a
+    change there re-minting ids: a drift orphans rows, which reads downstream as "no tests ran".
+    """
+    from spyre_clickhouse_ingest import v2_run_id, v2_test_case_id
+
+    assert (
+        str(v2_run_id("gha", "123", "x86_64", "regression"))
+        == "1a6080e8-d061-547f-ab63-1af99b18ad0c"
+    )
+    assert (
+        str(
+            v2_test_case_id(
+                "torch-spyre",
+                "test_ops",
+                "test_add",
+                ["testtype__trunk", "platform__x86_64"],
+            )
+        )
+        == "2f0e2626-3b33-56c7-9019-fb261450c7aa"
+    )
+
+
+def test_arch_is_folded_inside_the_hash():
+    """amd64/x86/x86-64 must reach the same id as x86_64, or a leg labelled either way
+    joins to nothing."""
+    from spyre_clickhouse_ingest import v2_run_id
+
+    canonical = v2_run_id("gha", "123", "x86_64", "regression")
+    for alias in ("amd64", "x86", "x86-64", "X86_64", " x86_64 "):
+        assert v2_run_id("gha", "123", alias, "regression") == canonical, alias
