@@ -47,16 +47,16 @@ from pathlib import Path
 
 from lxml import etree
 from spyre_clickhouse_ingest import (
+    cases_already_ingested,
+    component_of,
     extract_properties,
     get_client,
-    insert_v2,
+    insert_test_results,
     promote_xpass,
-    v2_already_ingested,
-    v2_component,
-    v2_database,
-    v2_run_id_for,
-    v2_source_and_external_run_id,
-    v2_tables_present,
+    run_id_for,
+    source_and_external_run_id,
+    tables_present,
+    target_database,
 )
 from spyre_clickhouse_ingest.junit import _runner_run_id, _threaded_run_id
 
@@ -387,8 +387,8 @@ def main():
     )
     client = get_client()
     # One client, both generations: v2 is reached by QUALIFYING every statement with this
-    # database name (see v2_database). "" means v2 is not configured.
-    v2db = v2_database() if args.write_v2 else ""
+    # database name (see target_database). "" means v2 is not configured.
+    v2db = target_database() if args.write_v2 else ""
     if args.write_v2 and not v2db:
         print(
             "  WARN --schema asked for v2 but CLICKHOUSE_DB_V2 is unset — v2 rows skipped",
@@ -433,7 +433,7 @@ def main():
         # Jenkins/standalone leg, so it's only an independent signal for a GHA numeric id.
         runner_run_id = _runner_run_id(args, run_id)
         # v1-table reads, so gated on v1 being written. v2 dedups against its own
-        # table via v2_already_ingested(run_id, component).
+        # table via cases_already_ingested(run_id, component).
         if args.write_v1:
             existing = client.query(
                 "SELECT count() FROM si_test_runs "
@@ -469,11 +469,11 @@ def main():
         # authoritative, so the experimental write is contained rather than allowed to
         # abort the loop and drop every remaining file's v1 insert.
         try:
-            if v2db and v2_tables_present(client, v2db):
-                _v2_source, _v2_ext = v2_source_and_external_run_id(args, run_id)
+            if v2db and tables_present(client, v2db):
+                _v2_source, _v2_ext = source_and_external_run_id(args, run_id)
                 _v2_tier = (getattr(args, "trigger_type", "") or "").strip()
                 _v2_arch = (args.platform or "").strip()
-                _v2_run_id = v2_run_id_for(args, run_id, _v2_arch, _v2_tier)
+                _v2_run_id = run_id_for(args, run_id, _v2_arch, _v2_tier)
                 if not _v2_run_id:
                     # Loud, because a blank run_id means these cases reach v2 unjoinable
                     # to any artifact -- and that reads downstream as "no tests ran".
@@ -483,19 +483,19 @@ def main():
                         f"tier={_v2_tier!r}); --trigger-type is the field usually missing",
                         file=sys.stderr,
                     )
-                elif v2_already_ingested(
+                elif cases_already_ingested(
                     client,
                     v2db,
                     _v2_run_id,
-                    v2_component(args, V2_COMPONENT_DEFAULT),
+                    component_of(args, V2_COMPONENT_DEFAULT),
                     xml_path.name,
                 ):
                     print(f"  v2: already ingested run_id={_v2_run_id} — skipping")
                 else:
-                    _n = insert_v2(
+                    _n = insert_test_results(
                         client,
                         v2db,
-                        v2_component(args, V2_COMPONENT_DEFAULT),
+                        component_of(args, V2_COMPONENT_DEFAULT),
                         _v2_run_id,
                         cases,
                         xml_path.name,
