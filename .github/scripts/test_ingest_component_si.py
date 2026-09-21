@@ -50,31 +50,29 @@ def mod():
 
 
 def test_default_is_this_repo_not_the_library_default(mod):
-    from spyre_clickhouse_ingest import v2_component
+    from spyre_clickhouse_ingest import component_of
 
-    assert mod.V2_COMPONENT_DEFAULT == "spyre-inference"
-    # v2_component takes the default as a PARAMETER precisely so each repo stamps itself; a
+    assert mod.COMPONENT_DEFAULT == "spyre-inference"
+    # component_of takes the default as a PARAMETER precisely so each repo stamps itself; a
     # bare call would silently yield the library's own default instead.
-    assert v2_component(_Args(component=""), mod.V2_COMPONENT_DEFAULT) == "spyre-inference"
-    assert v2_component(_Args(component="")) != "spyre-inference"
+    assert component_of(_Args(component=""), mod.COMPONENT_DEFAULT) == "spyre-inference"
+    assert component_of(_Args(component="")) != "spyre-inference"
 
 
 @pytest.mark.parametrize("args", [_Args(), _Args(component=""), _Args(component="   ")])
 def test_absent_or_blank_flag_keeps_the_default(mod, args):
-    from spyre_clickhouse_ingest import v2_component
+    from spyre_clickhouse_ingest import component_of
 
-    assert v2_component(args, mod.V2_COMPONENT_DEFAULT) == "spyre-inference"
+    assert component_of(args, mod.COMPONENT_DEFAULT) == "spyre-inference"
 
 
 def test_flag_overrides_and_that_changes_identity(mod):
-    from spyre_clickhouse_ingest import v2_component, v2_test_case_id
+    from spyre_clickhouse_ingest import case_id_for, component_of
 
-    assert v2_component(_Args(component="torch-spyre"), mod.V2_COMPONENT_DEFAULT) == "torch-spyre"
+    assert component_of(_Args(component="torch-spyre"), mod.COMPONENT_DEFAULT) == "torch-spyre"
     # The override is only useful because it re-owns the identity: a cell running another
     # component's suite must not hash its cases under spyre-inference.
-    assert v2_test_case_id("torch-spyre", "T", "t", []) != v2_test_case_id(
-        "spyre-inference", "T", "t", []
-    )
+    assert case_id_for("torch-spyre", "T", "t", []) != case_id_for("spyre-inference", "T", "t", [])
 
 
 def test_component_flag_is_declared():
@@ -93,15 +91,15 @@ def test_identity_goldens():
     The library is installed from torch-spyre@main, so these are the in-repo tripwire for a
     change there re-minting ids: a drift orphans rows, which reads downstream as "no tests ran".
     """
-    from spyre_clickhouse_ingest import v2_run_id, v2_test_case_id
+    from spyre_clickhouse_ingest import case_id_for, run_id_of
 
     assert (
-        str(v2_run_id("gha", "123", "x86_64", "regression"))
+        str(run_id_of("gha", "123", "x86_64", "regression"))
         == "1a6080e8-d061-547f-ab63-1af99b18ad0c"
     )
     assert (
         str(
-            v2_test_case_id(
+            case_id_for(
                 "torch-spyre",
                 "test_ops",
                 "test_add",
@@ -115,8 +113,8 @@ def test_identity_goldens():
 def test_arch_is_folded_inside_the_hash():
     """amd64/x86/x86-64 must reach the same id as x86_64, or a leg labelled either way
     joins to nothing."""
-    from spyre_clickhouse_ingest import v2_run_id
+    from spyre_clickhouse_ingest import run_id_of
 
-    canonical = v2_run_id("gha", "123", "x86_64", "regression")
+    canonical = run_id_of("gha", "123", "x86_64", "regression")
     for alias in ("amd64", "x86", "x86-64", "X86_64", " x86_64 "):
-        assert v2_run_id("gha", "123", alias, "regression") == canonical, alias
+        assert run_id_of("gha", "123", alias, "regression") == canonical, alias

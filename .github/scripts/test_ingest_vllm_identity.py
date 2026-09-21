@@ -21,11 +21,11 @@ CONSTANTS rather than recomputed by the same code under test -- recomputing woul
 if every writer drifted together.
 
 The cross-writer contract these must match:
-  * torch-spyre  .github/scripts/ingest_xml.py  v2_artifact_id / v2_run_id
+  * torch-spyre  .github/scripts/ingest_xml.py  artifact_id_for / run_id_of
   * frameworks   vars/pushToClickhouse.groovy   deriveArtifactIds / deriveRunIds
   * frameworks   pipelines/lib/run_identity.py
 
-An earlier version of this file's v2_canonical_arch folded only ('amd64', 'x86') and did not
+An earlier version of this file's canonical_arch folded only ('amd64', 'x86') and did not
 lowercase, so 'AMD64' and 'x86-64' hashed differently here than in the other writers -- the
 same run landing twice, joinable to neither. test_arch_aliases_all_fold pins that.
 """
@@ -73,28 +73,30 @@ def mod():
 # ── the shared namespace ────────────────────────────────────────────────────────
 
 
-def test_namespace_is_the_shared_v2_namespace(mod):
+def test_namespace_is_the_shared_v2_namespace():
     """Hardcoded as a literal here for speed; it must still equal the derived value, or every
-    id in this writer lands in a different space from every other writer's."""
-    assert str(mod.V2_NAMESPACE) == _NS
-    derived = uuid.uuid5(uuid.NAMESPACE_DNS, "clickhouse-v2.spyre.ibm.com")
-    assert derived == mod.V2_NAMESPACE
+    id in this writer lands in a different space from every other writer's. Asserted on the
+    library: this writer reaches the namespace only through the shared id functions."""
+    import spyre_clickhouse_ingest as lib
+
+    assert str(lib.ID_NAMESPACE) == _NS
+    assert uuid.uuid5(uuid.NAMESPACE_DNS, "clickhouse-v2.spyre.ibm.com") == lib.ID_NAMESPACE
 
 
 # ── run_id ─────────────────────────────────────────────────────────────────────
 
 
 def test_run_id_matches_the_golden_value(mod):
-    assert mod.v2_run_id("gha", "12345", "amd64", "integration") == _GOLDEN_RUN_ID
+    assert mod.run_id_of("gha", "12345", "amd64", "integration") == _GOLDEN_RUN_ID
 
 
 def test_run_id_is_blank_on_incomplete_input(mod):
     """Blank, not a hash of defaults: an all-defaults key is a real uuid that every
     incomplete run would share, which is worse than no id."""
-    assert mod.v2_run_id("", "12345", "amd64", "integration") == ""
-    assert mod.v2_run_id("gha", "", "amd64", "integration") == ""
-    assert mod.v2_run_id("gha", "12345", "", "integration") == ""
-    assert mod.v2_run_id("gha", "12345", "amd64", "") == ""
+    assert mod.run_id_of("", "12345", "amd64", "integration") == ""
+    assert mod.run_id_of("gha", "", "amd64", "integration") == ""
+    assert mod.run_id_of("gha", "12345", "", "integration") == ""
+    assert mod.run_id_of("gha", "12345", "amd64", "") == ""
 
 
 # ── arch folding, the regression this file exists for ──────────────────────────
@@ -102,20 +104,20 @@ def test_run_id_is_blank_on_incomplete_input(mod):
 
 @pytest.mark.parametrize("alias", ["amd64", "x86", "x86-64", "x86_64", "AMD64", " amd64 "])
 def test_arch_aliases_all_fold(mod, alias):
-    assert mod.v2_canonical_arch(alias) == "x86_64"
+    assert mod.canonical_arch(alias) == "x86_64"
 
 
 @pytest.mark.parametrize(
     ("raw", "expected"), [("S390X", "s390x"), ("ppc64le", "ppc64le"), ("PPC64LE", "ppc64le")]
 )
 def test_non_x86_arch_is_lowercased_not_folded(mod, raw, expected):
-    assert mod.v2_canonical_arch(raw) == expected
+    assert mod.canonical_arch(raw) == expected
 
 
 def test_arch_spelling_does_not_change_the_run_id(mod):
     """The point of folding INSIDE the hash: one machine, one id, however it is spelled."""
     ids = {
-        mod.v2_run_id("gha", "12345", a, "integration")
+        mod.run_id_of("gha", "12345", a, "integration")
         for a in ("amd64", "x86_64", "AMD64", "x86-64")
     }
     assert ids == {_GOLDEN_RUN_ID}
@@ -126,35 +128,35 @@ def test_arch_spelling_does_not_change_the_run_id(mod):
 
 def test_artifact_id_matches_the_golden_value(mod):
     assert (
-        mod.v2_artifact_id("torch-spyre", "flex-rpm", "abc123def456", "amd64")
+        mod.artifact_id_for("torch-spyre", "flex-rpm", "abc123def456", "amd64")
         == _GOLDEN_ARTIFACT_ID
     )
 
 
 def test_artifact_id_is_case_and_space_insensitive(mod):
     assert (
-        mod.v2_artifact_id("Torch-Spyre", " FLEX-RPM ", "ABC123DEF456", "AMD64")
+        mod.artifact_id_for("Torch-Spyre", " FLEX-RPM ", "ABC123DEF456", "AMD64")
         == _GOLDEN_ARTIFACT_ID
     )
 
 
 def test_artifact_id_refuses_a_blank_component_or_arch(mod):
-    assert mod.v2_artifact_id("", "flex-rpm", "abc123def456", "amd64") == ""
-    assert mod.v2_artifact_id("flex", "flex-rpm", "abc123def456", "") == ""
+    assert mod.artifact_id_for("", "flex-rpm", "abc123def456", "amd64") == ""
+    assert mod.artifact_id_for("flex", "flex-rpm", "abc123def456", "") == ""
 
 
 def test_artifact_id_allows_a_blank_id12(mod):
     """A GHA-derived identity carries a base-image + installed-set hash in that slot, and
     some legs have neither -- blank is a legitimate value, unlike a blank component."""
-    assert mod.v2_artifact_id("flex", "ibm-flex", "", "amd64") != ""
+    assert mod.artifact_id_for("flex", "ibm-flex", "", "amd64") != ""
 
 
 def test_content_changes_the_identity(mod):
-    a = mod.v2_artifact_id("flex", "ibm-flex", "abc123def456", "amd64")
+    a = mod.artifact_id_for("flex", "ibm-flex", "abc123def456", "amd64")
     for other in (
-        mod.v2_artifact_id("flex", "ibm-flex", "999999999999", "amd64"),
-        mod.v2_artifact_id("flex", "ibm-flex", "abc123def456", "s390x"),
-        mod.v2_artifact_id("deeptools", "ibm-flex", "abc123def456", "amd64"),
+        mod.artifact_id_for("flex", "ibm-flex", "999999999999", "amd64"),
+        mod.artifact_id_for("flex", "ibm-flex", "abc123def456", "s390x"),
+        mod.artifact_id_for("deeptools", "ibm-flex", "abc123def456", "amd64"),
     ):
         assert other != a
 
@@ -228,7 +230,7 @@ def test_uuid_in_run_id_is_used_verbatim(mod):
 def test_numeric_gha_run_id_derives(mod):
     """The in-repo GHA shape: no uuid to hand over, so the id is derived from the run id."""
     got = mod.resolve_v2_run_id(_args(mod, gha_run_id="34958223121"))
-    assert got == mod.v2_run_id("gha", "34958223121", "amd64", "perf")
+    assert got == mod.run_id_of("gha", "34958223121", "amd64", "perf")
 
 
 def test_uuid_wins_over_a_numeric_id(mod):
@@ -242,7 +244,7 @@ def test_a_numeric_run_id_still_derives(mod):
     """Back-compat: the OLD wiring put GitHub's numeric id in --run-id. Fall through to the
     derive path rather than rejecting it -- that is what such a caller meant."""
     got = mod.resolve_v2_run_id(_args(mod, run_id="34958223121"))
-    assert got == mod.v2_run_id("gha", "34958223121", "amd64", "perf")
+    assert got == mod.run_id_of("gha", "34958223121", "amd64", "perf")
 
 
 def test_legacy_v2_run_id_still_honoured(mod):
@@ -332,6 +334,5 @@ def test_identity_comes_from_the_shared_library_not_a_local_copy(mod):
     # object identity: editing the library must change what this writer executes.
     import spyre_clickhouse_ingest as lib
 
-    for name in ("v2_canonical_arch", "v2_run_id"):
+    for name in ("canonical_arch", "run_id_of", "artifact_id_for"):
         assert getattr(mod, name) is getattr(lib, name), name
-    assert mod.V2_NAMESPACE is lib.V2_NAMESPACE

@@ -12,11 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""The vLLM v2 reshaping path: Array/Map shaping, the per-metric collapse, and dedup.
+"""The vLLM v2 write path: the entry shaping, and what the shared writer makes of it.
 
-These functions derive the nested tables from the SAME rows the flat table gets, so a bug
-here shows up as two tables disagreeing about shape while agreeing about numbers -- which no
-value assertion on the flat write can catch.
+benchmark_runs is the ONLY perf fact written -- the HUD's oss_ci_benchmark_v3 pair is a
+materialized view over it -- so everything the dashboard reads has to survive this shaping.
+The collapse and merge assertions run through the real insert_benchmarks rather than a local
+copy of its rules, because a reimplementation here would stay green while the library moved.
 """
 
 from __future__ import annotations
@@ -47,9 +48,32 @@ def mod():
     return m
 
 
+class _Client:
+    """Captures what the writer would send. `query` answers the identity-dedup probe with
+    no known ids, so every identity row this leg derives is offered for insert."""
+
+    def __init__(self):
+        self.inserted: dict[str, list] = {}
+
+    def query(self, *_a, **_k):
+        return types.SimpleNamespace(result_rows=[])
+
+    def insert(self, table, rows, column_names=None, database=None):
+        self.inserted.setdefault(table, []).extend(
+            [dict(zip(column_names, r, strict=True)) for r in rows]
+        )
+
+
 def _flat(metric="latency", actual=1.5, test_name="latency_tp1_in64_out64", **extra):
-    """One flat results_v3 row, the only input shape the reshaping path accepts."""
-    base = {"test_name": test_name, "head_sha": "abc123", "model": "granite", "device": "spyre"}
+    """One flat results_v3 row, the only input shape the v2 write path accepts."""
+    base = {
+        "test_name": test_name,
+        "head_sha": "abc123",
+        "model": "granite",
+        "device": "spyre",
+        "arch": "x86_64",
+        "hardware_type": "IBM_Spyre",
+    }
     base.update(extra)
     return {
         "timestamp": 1,
@@ -65,15 +89,25 @@ def _flat(metric="latency", actual=1.5, test_name="latency_tp1_in64_out64", **ex
     }
 
 
+def _write(mod, rows):
+    """Run the real writer over these flat rows and return (benchmarks, benchmark_runs)."""
+    from spyre_clickhouse_ingest import insert_benchmarks
+
+    client = _Client()
+    insert_benchmarks(
+        client, "v2", mod.BENCH_COMPONENT, _RUN, mod._bench_entries(rows), report_kind="vllm"
+    )
+    return client.inserted.get("benchmarks", []), client.inserted.get("benchmark_runs", [])
+
+
 # --- _parse_input_shapes ---------------------------------------------------------------
 
 
 def test_parse_input_shapes_reads_all_three_discriminators(mod):
-    got = mod._parse_input_shapes("latency_tp4_in128_out256")
-    assert got == {
-        "tensor_parallel": ("int", {"value": "4"}),
-        "input_len": ("int", {"value": "128"}),
-        "output_len": ("int", {"value": "256"}),
+    assert mod._parse_input_shapes("latency_tp4_in128_out256") == {
+        "tensor_parallel": "4",
+        "input_len": "128",
+        "output_len": "256",
     }
 
 
@@ -85,79 +119,83 @@ def test_parse_input_shapes_ignores_non_numeric_tokens(mod, name):
 
 
 def test_shapes_discriminate_two_runs_of_one_benchmark(mod):
-    # The whole point of the Map: tp1 and tp4 were indistinguishable in the flat table.
-    assert mod._parse_input_shapes("latency_tp1_in64_out64") != mod._parse_input_shapes(
-        "latency_tp4_in64_out64"
-    )
+    # tp1 and tp4 were indistinguishable in the flat table, and they are hash inputs here.
+    idents_a, _ = _write(mod, [_flat(test_name="latency_tp1_in64_out64")])
+    idents_b, _ = _write(mod, [_flat(test_name="latency_tp4_in64_out64")])
+    assert idents_a[0]["benchmark_id"] != idents_b[0]["benchmark_id"]
 
 
-# --- to_vllm_v3_rows ------------------------------------------------------------------
+# --- entry shaping ---------------------------------------------------------------------
 
 
-def test_v3_rows_recover_what_the_flat_write_dropped(mod):
-    (row,) = mod.to_vllm_v3_rows([_flat()], _RUN)
-    assert row["run_id"] == _RUN
-    assert row["head_sha"] == "abc123", "blank on every flat row; recovered here"
-    assert row["name"] == "latency_tp1_in64_out64", "flat write hardcodes one constant"
-    assert row["model"][2] == "spyre", "model.backend is the HUD pivot axis"
-    assert row["metric"][1] == [1.5], "samples must be an Array, not a scalar"
+def test_entries_carry_what_the_flat_write_dropped(mod):
+    (entry,) = mod._bench_entries([_flat()])
+    assert entry["name"] == "latency_tp1_in64_out64", "the flat write hardcodes one constant"
+    assert entry["backend"] == "spyre", "backend is the HUD's pivot axis"
+    assert entry["props"]["model"] == "granite"
+    assert entry["measurements"] == {"latency": [1.5]}, "samples are an Array, not a scalar"
 
 
-def test_v3_metric_samples_stay_a_list_of_floats(mod):
-    (row,) = mod.to_vllm_v3_rows([_flat(actual="2.5")], _RUN)
-    samples = row["metric"][1]
-    assert isinstance(samples, list) and all(isinstance(s, float) for s in samples)
+def test_run_props_carry_the_ci_coordinates_the_hud_view_reads(mod):
+    # oss_ci_benchmark_v3_mv reads these off benchmark_runs.props; it cannot see them
+    # otherwise, and a guess would put a wrong commit on a chart.
+    (entry,) = mod._bench_entries([_flat()])
+    assert entry["run_props"] == {
+        "repo": "torch-spyre/spyre-inference",
+        "head_branch": "main",
+        "workflow_id": "7",
+        "run_attempt": "1",
+        "job_id": "9",
+        "head_sha": "abc123",
+        "arch": "x86_64",
+        "hardware_type": "IBM_Spyre",
+    }
 
 
-def test_v3_mode_comes_from_the_test_name_prefix(mod):
-    for name, mode in (("serve_tp1", "serve"), ("throughput_tp1", "throughput"), ("", "")):
-        (row,) = mod.to_vllm_v3_rows([_flat(test_name=name)], _RUN)
-        assert row["benchmark"][1] == mode
+def test_metric_samples_stay_floats(mod):
+    (entry,) = mod._bench_entries([_flat(actual="2.5")])
+    (samples,) = entry["measurements"].values()
+    assert samples == [2.5] and all(isinstance(s, float) for s in samples)
 
 
-def test_v3_extra_does_not_duplicate_first_class_columns(mod):
-    # Storing a value twice lets the two copies drift.
-    (row,) = mod.to_vllm_v3_rows([_flat()], _RUN)
-    assert "head_sha" not in row["extra"]
+def test_run_mode_comes_from_the_test_name_prefix(mod):
+    for name, mode in (("serve_tp1", "serve"), ("throughput_tp1", "throughput")):
+        (entry,) = mod._bench_entries([_flat(test_name=name)])
+        assert entry["props"]["run_mode"] == mode
 
 
-# --- v2_benchmark_id ------------------------------------------------------------------
+def test_which_file_reported_it_does_not_split_the_benchmark(mod):
+    # The writer reads both the native json and the .pytorch.json copy, and a benchmark_id is
+    # a content hash of the name -- so the two must converge before they reach the hash.
+    assert mod._test_name("latency_tp1.json") == mod._test_name("latency_tp1.pytorch.json")
+    a = _flat(test_name="latency_tp1")
+    b = _flat(test_name="latency_tp1", metric="p90")
+    idents, _facts = _write(mod, [a, b])
+    assert len(idents) == 1
 
 
-def test_benchmark_id_ignores_which_file_reported_it(mod):
-    # The writer reads both the native json and the .pytorch.json copy; one benchmark must
-    # not split by reporter.
-    a = mod.v2_benchmark_id("spyre-inference", "latency_tp1.json", [], {})
-    b = mod.v2_benchmark_id("spyre-inference", "latency_tp1.pytorch.json", [], {})
-    assert a == b != ""
+def test_unnamed_benchmarks_are_skipped_not_merged(mod):
+    # An id over a blank name would collide every unidentifiable benchmark onto one identity.
+    assert mod._bench_entries([_flat(test_name="")]) == []
 
 
-def test_benchmark_id_refuses_an_empty_name(mod):
-    # An id here would collide every unidentifiable benchmark onto one identity.
-    assert mod.v2_benchmark_id("spyre-inference", "", [], {}) == ""
-    assert mod.v2_benchmark_id("spyre-inference", "   ", [], {}) == ""
+def test_iterations_stays_zero(mod):
+    # 0 is the column's "the producer did not say": vLLM reports a pre-averaged value per
+    # metric and never the n behind it. insert_benchmarks SUMS iterations across the merged
+    # entries, so any per-metric placeholder would add up to the metric count.
+    flat = [_flat(metric=m) for m in ("p50", "p90", "p99")]
+    _idents, (fact,) = _write(mod, flat)
+    assert fact["iterations"] == 0
 
 
-def test_benchmark_id_varies_with_the_discriminators(mod):
-    base = mod.v2_benchmark_id("spyre-inference", "latency", [], {"tensor_parallel": "1"})
-    other = mod.v2_benchmark_id("spyre-inference", "latency", [], {"tensor_parallel": "4"})
-    assert base != other
-
-
-def test_benchmark_id_is_tag_order_independent(mod):
-    a = mod.v2_benchmark_id("spyre-inference", "latency", ["x", "y"], {})
-    b = mod.v2_benchmark_id("spyre-inference", "latency", ["y", "x"], {})
-    assert a == b
-
-
-# --- to_v2_benchmark_rows: the per-metric collapse ------------------------------------
+# --- what the shared writer makes of them ----------------------------------------------
 
 
 def test_many_metrics_of_one_benchmark_collapse_to_one_row(mod):
     # 26 metrics of one benchmark are ONE measurement. A row per metric would multiply
-    # every trend point by the metric count -- the bug this collapse exists to prevent.
+    # every trend point by the metric count.
     flat = [_flat(metric=m, actual=i) for i, m in enumerate(["p50", "p90", "p99", "mean"])]
-    idents, facts = mod.to_v2_benchmark_rows(mod.to_vllm_v3_rows(flat, _RUN), _RUN)
+    idents, facts = _write(mod, flat)
     assert len(facts) == 1, f"expected one collapsed row, got {len(facts)}"
     assert set(facts[0]["measurements"]) == {"p50", "p90", "p99", "mean"}
     assert len(idents) == 1
@@ -166,45 +204,32 @@ def test_many_metrics_of_one_benchmark_collapse_to_one_row(mod):
 def test_backend_splits_facts_but_not_identity(mod):
     # backend is a COLUMN, never a hash input: it is the axis a cross-backend comparison
     # pivots on, so folding it into identity would make the two sides different benchmarks.
-    flat = [_flat(device="spyre"), _flat(device="cpu")]
-    idents, facts = mod.to_v2_benchmark_rows(mod.to_vllm_v3_rows(flat, _RUN), _RUN)
+    idents, facts = _write(mod, [_flat(device="spyre"), _flat(device="cpu")])
     assert len(idents) == 1, "one benchmark identity across backends"
     assert {f["backend"] for f in facts} == {"spyre", "cpu"}
     assert len({f["benchmark_id"] for f in facts}) == 1
 
 
-def test_rows_with_no_measurements_are_dropped(mod):
-    # chk_measurements refuses an empty map: nothing measured is a parse failure.
-    v3 = mod.to_vllm_v3_rows([_flat()], _RUN)
-    v3[0]["metric"] = (v3[0]["metric"][0], [], 0.0, {})
-    _idents, facts = mod.to_v2_benchmark_rows(v3, _RUN)
-    assert facts == []
-
-
-def test_unnamed_benchmarks_are_skipped_not_merged(mod):
-    v3 = mod.to_vllm_v3_rows([_flat()], _RUN)
-    v3[0]["name"] = ""
-    idents, facts = mod.to_v2_benchmark_rows(v3, _RUN)
-    assert (idents, facts) == ({}, [])
-
-
 def test_two_files_reporting_one_benchmark_merge_richer_props(mod):
     # The merge must not lose a field when the same benchmark arrives twice.
-    a = _flat(test_name="latency_tp1_in64_out64")
+    a = _flat(test_name="latency_tp1_in64_out64", model="latency_tp1_in64_out64")
     b = _flat(test_name="latency_tp1_in64_out64", model="granite-3b")
-    idents, _facts = mod.to_v2_benchmark_rows(mod.to_vllm_v3_rows([a, b], _RUN), _RUN)
-    (props,) = [row[4] for row in idents.values()]
-    assert props.get("tensor_parallel") == "1"
+    (ident,), _facts = _write(mod, [a, b])
+    assert ident["props"]["tensor_parallel"] == "1"
+    assert ident["props"]["model"] == "granite-3b"
 
 
-def test_iterations_tracks_the_widest_sample_array(mod):
-    v3 = mod.to_vllm_v3_rows([_flat(metric="p50"), _flat(metric="p90")], _RUN)
-    v3[0]["metric"] = ("p50", [1.0, 2.0, 3.0], 0.0, {})
-    _idents, facts = mod.to_v2_benchmark_rows(v3, _RUN)
-    assert facts[0]["iterations"] == 3
+def test_repeated_metrics_of_one_benchmark_become_samples(mod):
+    # Map(String, Array(Float64)) exists to keep both: overwriting froze variance at zero.
+    _idents, (fact,) = _write(
+        mod, [_flat(metric="p50", actual=1.0), _flat(metric="p50", actual=2.0)]
+    )
+    assert fact["measurements"]["p50"] == [1.0, 2.0]
 
 
-def test_run_id_is_stamped_on_every_fact_row(mod):
+def test_run_id_and_report_kind_are_stamped_on_every_fact_row(mod):
+    # report_kind scopes the dedup probe, so it must reach the row the probe reads.
     flat = [_flat(metric="p50"), _flat(metric="p90", test_name="serve_tp1_in8_out8")]
-    _idents, facts = mod.to_v2_benchmark_rows(mod.to_vllm_v3_rows(flat, _RUN), _RUN)
+    _idents, facts = _write(mod, flat)
     assert facts and all(f["run_id"] == _RUN for f in facts)
+    assert all(f["props"]["report_kind"] == "vllm" for f in facts)

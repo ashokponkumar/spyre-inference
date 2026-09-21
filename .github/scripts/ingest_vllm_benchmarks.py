@@ -32,50 +32,22 @@ from argparse import ArgumentParser
 from typing import Any
 
 import clickhouse_connect
-from spyre_clickhouse_ingest import V2_NAMESPACE, v2_canonical_arch, v2_run_id
+from spyre_clickhouse_ingest import (
+    artifact_id_for,
+    benchmarks_already_ingested,
+    canonical_arch,
+    insert_benchmarks,
+    run_id_of,
+    schema,
+    tables_present,
+    target_database,
+)
 from utils import read_benchmark_results
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
 RESULTS_TABLE = "results_v3"
-# Upstream-aligned table (pytorch/test-infra benchmark.oss_ci_benchmark_v3) plus our run_id.
-# Written ALONGSIDE results_v3, never instead of it: the HUD reads the flat table today.
-VLLM_V3_TABLE = "vllm_results_v3"
-
-
-def _v2_norm(value) -> str:
-    """Canonical scalar form for every hash input. Lowercasing is not cosmetic: the same
-    tier arrives as 'Regression' from a Jenkins parameter and 'regression' from a GHA
-    input, and any writer that skips it mints a different id for the same thing."""
-    return ("" if value is None else str(value)).strip().lower()
-
-
-def v2_artifact_id(component: str, artifact_name: str, id12: str, arch: str) -> str:
-    """uuid5 over component|artifact_name|id12|arch -- the v2 artifact identity.
-
-    Same fields and order as v2_artifact_id() in torch-spyre's ingest_xml.py and
-    deriveArtifactIds() in pushToClickhouse.groovy, so this leg derives the id the
-    orchestrator would have written without anything being threaded to it. That is the
-    whole point: a GHA perf leg reads its own RPM lockfile and joins.
-    """
-    if not (_v2_norm(component) and v2_canonical_arch(arch)):
-        return ""
-    return str(
-        uuid.uuid5(
-            V2_NAMESPACE,
-            "|".join(
-                (
-                    _v2_norm(component),
-                    _v2_norm(artifact_name),
-                    _v2_norm(id12),
-                    v2_canonical_arch(arch),
-                )
-            ),
-        )
-    )
-
-
 METADATA_TABLE = "run_metadata"
 
 
@@ -405,7 +377,7 @@ def rpm_artifact_ids(lock_path: str, arch: str) -> list[str]:
     suffix, which is how the builder names it. Verified against prod: `ibm-flex-devel` and
     `ibm-flex` share one id12 and one component, so the two rows collapse to one artifact.
     """
-    a = v2_canonical_arch(arch)
+    a = canonical_arch(arch)
     if not a:
         return []
     seen: dict[str, None] = {}
@@ -427,81 +399,24 @@ def rpm_artifact_ids(lock_path: str, arch: str) -> list[str]:
         # Derived, not built as a delimited string: artifact_results.artifact_id is a UUID in
         # v2, and the orchestrator hashes these same four fields, so both sides agree without
         # this leg ever being told the id.
-        aid = v2_artifact_id(component, artifact_name, id12, a)
+        aid = artifact_id_for(component, artifact_name, id12, a)
         if aid:
             seen.setdefault(aid, None)
     return list(seen)
 
 
-def _parse_input_shapes(test_name: str) -> dict[str, Any]:
-    """tp1_in64_out64 -> the shape Map upstream carries in `inputs`.
+def _parse_input_shapes(test_name: str) -> dict[str, str]:
+    """tp1_in64_out64 -> {tensor_parallel, input_len, output_len}.
 
-    These discriminate two runs of the SAME benchmark. The flat table kept them only
-    inside the test_name string, so a tp1 and a tp4 result were indistinguishable
-    without substring parsing at read time.
+    These are identity discriminators, not decoration: without them tp1 and tp4 are one
+    benchmark whose trend line alternates between two unrelated numbers.
     """
-    out: dict[str, Any] = {}
+    out: dict[str, str] = {}
     for token in (test_name or "").split("_"):
         for prefix, key in (("tp", "tensor_parallel"), ("in", "input_len"), ("out", "output_len")):
             rest = token[len(prefix) :]
             if token.startswith(prefix) and rest.isdigit():
-                out[key] = ("int", {"value": rest})
-    return out
-
-
-def to_vllm_v3_rows(rows: list[dict[str, Any]], run_id: str) -> list[dict[str, Any]]:
-    """Reshape flat results_v3 rows into the upstream-aligned nested shape.
-
-    Derived from the SAME rows the flat table gets, so the two tables can never disagree
-    about a number -- only about shape. Recovers four things the flat write dropped:
-    head_sha as a real column (blank on every flat row, hidden in extra), the benchmark
-    name (the flat write hardcodes one constant for all benchmarks), model.backend (the
-    HUD's pivot axis, absent entirely), and the metric samples as an Array.
-    """
-    out = []
-    for r in rows:
-        extra = json.loads(r["extra"])
-        test_name = extra.get("test_name", "")
-        # vLLM's own mode: latency | throughput | serve. Already the test_name prefix.
-        mode = test_name.split("_")[0] if test_name else ""
-        out.append(
-            {
-                "run_id": run_id,
-                "timestamp": r["timestamp"],
-                "schema_version": "v3",
-                # The benchmark name, not a constant -- this is what makes per-benchmark
-                # history possible at all.
-                "name": test_name or r["metric"],
-                "repo": r["repo"],
-                "head_branch": r["head_branch"],
-                "head_sha": extra.get("head_sha", ""),
-                "workflow_id": r["workflow_id"],
-                "run_attempt": int(r.get("run_attempt") or 0),
-                "job_id": int(r.get("job_id") or 0),
-                "runners": [(extra.get("hardware_type", ""), extra.get("device", ""))],
-                "benchmark": (test_name, mode, "", {}),
-                # backend is a COLUMN, never a hash input: it is the axis a cross-backend
-                # comparison pivots ON, so folding it into identity would make the two
-                # sides of the comparison different benchmarks. That was v1's mistake.
-                "model": (
-                    extra.get("model", ""),
-                    "llm",
-                    extra.get("device", ""),
-                    ["huggingface"],
-                ),
-                # Array, so variance and percentiles stay recomputable downstream.
-                "metric": (r["metric"], [float(r["actual"])], float(r["target"] or 0.0), {}),
-                "inputs": _parse_input_shapes(test_name),
-                "dependencies": {},
-                # Only what is NOT already a first-class column, so the same value is not
-                # stored twice and cannot drift between the two copies.
-                "extra": {
-                    k: str(v)
-                    for k, v in extra.items()
-                    if k not in ("head_sha", "model", "test_name")
-                },
-            }
-        )
+                out[key] = rest
     return out
 
 
@@ -550,17 +465,17 @@ def resolve_v2_run_id(args) -> str:
             # A numeric value here is the old wiring (GitHub's run id in --run-id). Fall through
             # to the derive path rather than skipping: that is what the caller meant.
             if verbatim.isdigit():
-                return v2_run_id("gha", verbatim, args.arch, getattr(args, "test_type", "perf"))
+                return run_id_of("gha", verbatim, args.arch, getattr(args, "test_type", "perf"))
             log.warning("--run-id %r is neither a uuid nor numeric; v2 rows skipped", verbatim)
             return ""
         return verbatim
     gha = (getattr(args, "gha_run_id", "") or "").strip()
     if not gha:
         return ""
-    return v2_run_id("gha", gha, args.arch, getattr(args, "test_type", "perf"))
+    return run_id_of("gha", gha, args.arch, getattr(args, "test_type", "perf"))
 
 
-def _write_artifact_results(client, v2_rows, run_id_value: str, rpm_lock: str, arch: str) -> None:
+def _write_artifact_results(client, db: str, rows, run_id_value: str, rpm_lock: str, arch: str):
     """One artifact_results row per RPM the leg installed, linking perf to what it measured.
 
     Why per RPM and not one row: a GHA perf leg has no single built image. Its stack is the set
@@ -571,8 +486,8 @@ def _write_artifact_results(client, v2_rows, run_id_value: str, rpm_lock: str, a
     result_kind='performance' with test_type='perf', matching the rows Jenkins pushArtifactResult
     already writes -- this is the same contract from the other launcher, not a new one.
 
-    Contained: this is the FIRST writer to artifact_results from Actions (prod has 4,921 Jenkins
-    rows and zero GHA), so a failure here must not cost the benchmark rows already written.
+    Contained: this is the FIRST writer to artifact_results from Actions, so a failure here must
+    not cost the benchmark rows already written.
     """
     if not rpm_lock:
         return
@@ -581,207 +496,155 @@ def _write_artifact_results(client, v2_rows, run_id_value: str, rpm_lock: str, a
         if not ids:
             log.info("no artifact_id derivable from %s — artifact link skipped", rpm_lock)
             return
-        if not client.command("EXISTS TABLE artifact_results"):
-            log.info("artifact_results absent — artifact link skipped")
+        table = schema.ARTIFACT_RESULTS
+        if not tables_present(client, db, tables=(table,)):
+            log.info("%s absent — artifact link skipped", table.qualified(db))
             return
         # artifact_results is a plain MergeTree with no dedup key, so a re-ingest of one leg
         # DOUBLES its rows -- and every per-artifact counter is derived from them. Check first.
         already = client.query(
-            "SELECT count() FROM artifact_results "
+            f"SELECT count() FROM {table.qualified(db)} "
             "WHERE run_id = {rid:UUID} AND result_kind = 'performance'",
             parameters={"rid": run_id_value},
         ).result_rows
         if already and already[0][0] > 0:
             log.info("artifact link already present for run_id=%s — skipping", run_id_value)
             return
-        first = v2_rows[0]
-        cols = [
-            "artifact_id",
-            "run_id",
-            "result_kind",
-            "test_type",
-            "state",
-            "arch",
-            "duration_s",
-            "props",
-        ]
+        first, first_extra = rows[0], json.loads(rows[0]["extra"])
         # No total_tests/passed/failed/errors/skipped: v2 does not store them, because they are
         # derivable by counting the run's own rows and a stored copy is a second source of truth.
         # The benchmark count still goes in props -- a perf leg has no test_case_runs rows to
         # count, so this is the only record of how many benchmarks it measured. It counts
         # BENCHMARKS not metrics: 26 metrics of one benchmark is one measurement, so counting
         # metrics would inflate every perf leg ~26x.
-        benchmarks = len({r["name"] for r in v2_rows})
-        rows = [
+        benchmarks = len({json.loads(r["extra"]).get("test_name", "") for r in rows})
+        props = {
+            "source": "gha",
+            # run_url is THE link key across the whole v2 schema -- one key for a Jenkins build
+            # url or a GitHub Actions run url, so a reader never has to know which system
+            # produced the row. Built here rather than left to the reader: the URL shape is
+            # GitHub's, and a dashboard route should not have to know it.
+            "run_url": (
+                f"https://github.com/{first['repo']}/actions/runs/{first['workflow_id']}"
+                if first.get("repo") and first.get("workflow_id")
+                else ""
+            ),
+            "workflow_id": str(first["workflow_id"]),
+            "rpm_lock": rpm_lock,
+            "head_sha": first_extra.get("head_sha", ""),
+            "benchmarks": str(benchmarks),
+        }
+        schema.insert(
+            client,
+            table,
             [
-                aid,
-                run_id_value,
-                "performance",
-                "perf",
-                "passed",
-                v2_canonical_arch(arch),
-                0.0,
                 {
-                    "source": "gha",
-                    # run_url is THE link key across the whole v2 schema -- one key for a
-                    # Jenkins build url or a GitHub Actions run url, so a reader never has to
-                    # know which system produced the row. Built here rather than left to the
-                    # reader: the URL shape is GitHub's, and a dashboard route should not have
-                    # to know it.
-                    "run_url": (
-                        f"https://github.com/{first['repo']}/actions/runs/{first['workflow_id']}"
-                        if first.get("repo") and first.get("workflow_id")
-                        else ""
-                    ),
-                    "workflow_id": str(first["workflow_id"]),
-                    "rpm_lock": rpm_lock,
-                    "head_sha": first["head_sha"],
-                    "benchmarks": str(benchmarks),
-                },
-            ]
-            for aid in ids
-        ]
-        client.insert("artifact_results", rows, column_names=cols)
-        log.info("Linked %d artifact(s) to run_id=%s in artifact_results", len(rows), run_id_value)
+                    "artifact_id": aid,
+                    "run_id": run_id_value,
+                    "result_kind": "performance",
+                    "test_type": "perf",
+                    "state": "passed",
+                    "arch": canonical_arch(arch),
+                    "duration_s": 0.0,
+                    "props": props,
+                }
+                for aid in ids
+            ],
+            db=db,
+        )
+        log.info("Linked %d artifact(s) to run_id=%s in artifact_results", len(ids), run_id_value)
     except Exception as exc:  # noqa: BLE001
         log.warning("artifact_results link failed, benchmark rows unaffected: %r", exc)
 
 
 # ── v2 benchmarks / benchmark_runs ───────────────────────────────────────────────────────
-# The perf surfaces of the v2 dashboard read this dimension+fact pair, not the flat tables.
-V2_BENCH_COMPONENT = "spyre-inference"
+# The perf surfaces of the v2 dashboard read this dimension+fact pair, and the HUD's
+# oss_ci_benchmark_v3 / oss_ci_benchmark_metadata are materialized views over benchmark_runs
+# (schema/70-vllm-hud-projection.sql in torch-spyre). So this is the ONLY perf write: the
+# upstream-shaped rows are projected from it rather than inserted a second time, which is what
+# keeps the two from disagreeing.
+BENCH_COMPONENT = "spyre-inference"
 
-
-def _strip_pytorch_suffix(name: str) -> str:
-    """One benchmark must not split by which file reported it: the writer reads both the
-    native json and the `.pytorch.json` copy, and a benchmark_id is a content hash."""
-    return re.sub(r"\.pytorch\.json$|\.json$", "", name or "")
-
+_BENCH_TABLES = (schema.BENCHMARKS, schema.BENCHMARK_RUNS)
 
 # In the hash, not merely in props: mode and the input shapes are what separate two runs of
-# the same model, and component is what keeps a `latency` here distinct from a same-named
-# benchmark in another producer's suite.
-_V2_BENCH_ID_KEYS = ("record_type", "run_mode", "tensor_parallel", "input_len", "output_len")
+# the same model. component leads the hash, so a `latency` here cannot collide with a
+# same-named benchmark in another producer's suite.
+_BENCH_ID_KEYS = ("record_type", "run_mode", "tensor_parallel", "input_len", "output_len")
+
+# The MV cannot see the CI coordinates, so it reads them off benchmark_runs.props; guessing
+# them downstream would put a wrong commit on a chart.
+_RUN_PROP_COLUMNS = ("repo", "head_branch", "workflow_id", "run_attempt", "job_id")
+_RUN_PROP_EXTRA_KEYS = ("head_sha", "arch", "hardware_type")
 
 
-def v2_benchmark_id(component: str, name: str, tags, disc: dict[str, Any]) -> str:
-    """uuid5 over component + name + sorted(tags) + the identity discriminators. Empty name
-    refuses an id: it would collide every unidentifiable benchmark onto one identity."""
-    n = _strip_pytorch_suffix((name or "").strip())
-    if not n:
-        return ""
-    tag_part = ",".join(sorted({str(t).strip() for t in (tags or []) if str(t).strip()}))
-    disc_part = ",".join(f"{k}={str(disc.get(k) or '')}" for k in _V2_BENCH_ID_KEYS)
-    return str(uuid.uuid5(V2_NAMESPACE, f"{component}|{n}|{tag_part}|{disc_part}"))
+def _bench_entries(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The flat results_v3 rows in the shared writer's entry shape.
 
+    One entry per (benchmark, metric); insert_benchmarks merges them into one benchmark_runs
+    row per (benchmark, backend), so the 26 metrics of one benchmark stay one measurement
+    rather than 26 trend points.
 
-def to_v2_benchmark_rows(v2_rows: list[dict[str, Any]], run_id: str) -> tuple[dict, list]:
-    """Collapse the per-metric rows into one benchmark_runs row per (benchmark, backend).
-
-    26 metrics of one benchmark are one measurement, so they belong in the measurements Map
-    of a single row -- one row per metric would multiply every trend point by the metric
-    count. backend stays a COLUMN and never a hash input: it is the axis a cross-backend
-    comparison pivots on.
+    iterations stays 0 throughout: vLLM's harness reports a pre-averaged value per metric and
+    does not tell us the n behind it, and the column's contract is the producer's reported
+    count, not a derived one.
     """
-    ident_rows: dict[str, list] = {}
-    facts: dict[tuple[str, str], dict[str, Any]] = {}
-    for r in v2_rows:
-        name = _strip_pytorch_suffix(r.get("name") or "")
+    entries = []
+    for r in rows:
+        extra = json.loads(r["extra"])
+        # Already suffix-stripped by _test_name, which is what makes the native json and the
+        # `.pytorch.json` copy of one benchmark reach one identity rather than two.
+        name = extra.get("test_name") or ""
         if not name:
             continue
-        _model, _mtype, backend, _origins = r["model"]
-        shapes = {k: v[1]["value"] for k, v in (r.get("inputs") or {}).items()}
-        disc = {"record_type": "model", "run_mode": r["benchmark"][1], **shapes}
-        bid = v2_benchmark_id(V2_BENCH_COMPONENT, name, [], disc)
-        if not bid:
-            continue
-        props = {k: str(v) for k, v in disc.items() if v != ""}
+        # vLLM's own mode: latency | throughput | serve. Already the test_name prefix.
+        props = {"record_type": "model", "run_mode": name.split("_")[0]}
+        props.update(_parse_input_shapes(name))
+        model = extra.get("model", "")
         # The native latency json carries no model, so _model_from_record falls back to the
         # filename. Keep it only when it says something the name does not already.
-        if _model and _model != name:
-            props["model"] = _model
-        prev = ident_rows.get(bid)
-        # Two files report one benchmark; the richer props win so the merge cannot lose a field.
-        if prev:
-            merged = dict(prev[4])
-            merged.update(props)
-            props = merged
-        ident_rows[bid] = [bid, V2_BENCH_COMPONENT, name, [], props]
-        fact = facts.setdefault(
-            (bid, backend),
+        if model and model != name:
+            props["model"] = model
+        run_props = {k: str(r.get(k, "")) for k in _RUN_PROP_COLUMNS}
+        run_props.update({k: str(extra.get(k, "")) for k in _RUN_PROP_EXTRA_KEYS})
+        entries.append(
             {
-                "run_id": run_id,
-                "benchmark_id": bid,
-                "component": V2_BENCH_COMPONENT,
-                "backend": backend,
-                "measurements": {},
+                "name": name,
+                "tags": [],
+                # backend is a COLUMN, never a hash input: it is the axis a cross-backend
+                # comparison pivots ON, so folding it into identity would make the two sides
+                # of the comparison different benchmarks.
+                "backend": extra.get("device", ""),
+                "props": props,
+                "measurements": {r["metric"]: [float(r["actual"])]},
                 "iterations": 0,
-                "props": {},
-            },
+                "run_props": run_props,
+                "disc": props,
+                "disc_keys": _BENCH_ID_KEYS,
+            }
         )
-        metric_name, samples, _target, _extra = r["metric"]
-        if samples:
-            fact["measurements"][metric_name] = float(samples[0])
-            fact["iterations"] = max(fact["iterations"], len(samples))
-    # chk_measurements refuses an empty map: nothing measured is a parse failure, not a result.
-    return ident_rows, [f for f in facts.values() if f["measurements"]]
+    return entries
 
 
-def _write_v2_benchmarks(client, v2_rows, run_id_value: str) -> None:
+def _write_v2_benchmarks(client, db: str, rows, run_id_value: str) -> None:
     """benchmarks + benchmark_runs for this leg. Additive and contained: an absent table is
     the normal state until the DDL lands, and a failure must not cost the flat rows."""
     try:
-        if not client.command("EXISTS TABLE benchmarks") or not client.command(
-            "EXISTS TABLE benchmark_runs"
-        ):
-            log.info("benchmarks/benchmark_runs absent — v2 perf rows skipped")
+        if not tables_present(client, db, tables=_BENCH_TABLES):
+            log.info("benchmarks/benchmark_runs absent or stale in %s — v2 perf rows skipped", db)
             return
-        # Plain MergeTree with no dedup key, so a re-ingest doubles every number behind a mean.
-        already = client.query(
-            "SELECT count() FROM benchmark_runs "
-            "WHERE component = {c:String} AND run_id = {rid:UUID}",
-            parameters={"c": V2_BENCH_COMPONENT, "rid": run_id_value},
-        ).result_rows
-        if already and already[0][0] > 0:
+        if benchmarks_already_ingested(client, db, run_id_value, BENCH_COMPONENT, "vllm"):
             log.info("v2 perf rows already present for run_id=%s — skipping", run_id_value)
             return
-        ident_rows, facts = to_v2_benchmark_rows(v2_rows, run_id_value)
-        if not facts:
-            log.warning("no v2 benchmark rows derivable — skipped")
-            return
-        # The dimension is also a plain MergeTree: a known identity re-inserted appends a
-        # duplicate, and the collision is ACROSS runs, so in-run dedup is not enough.
-        ids = list(ident_rows)
-        known = {
-            str(row[0])
-            for row in client.query(
-                "SELECT benchmark_id FROM benchmarks WHERE benchmark_id IN {ids:Array(UUID)}",
-                parameters={"ids": ids},
-            ).result_rows
-        }
-        new_ident = [row for bid, row in ident_rows.items() if bid not in known]
-        if new_ident:
-            client.insert(
-                "benchmarks",
-                new_ident,
-                column_names=["benchmark_id", "component", "name", "tags", "props"],
-            )
-        cols = [
-            "run_id",
-            "benchmark_id",
-            "component",
-            "backend",
-            "measurements",
-            "iterations",
-            "props",
-        ]
-        client.insert("benchmark_runs", [[f[c] for c in cols] for f in facts], column_names=cols)
-        log.info(
-            "Inserted %d benchmark identity row(s) and %d benchmark_runs row(s) under run_id=%s",
-            len(new_ident),
-            len(facts),
+        n = insert_benchmarks(
+            client,
+            db,
+            BENCH_COMPONENT,
             run_id_value,
+            _bench_entries(rows),
+            report_kind="vllm",
         )
+        log.info("Inserted %d benchmark_runs row(s) under run_id=%s", n, run_id_value)
     except Exception as exc:  # noqa: BLE001
         log.warning("v2 perf write failed, %s unaffected: %r", RESULTS_TABLE, exc)
 
@@ -831,37 +694,23 @@ def insert_to_clickhouse(
     )
     log.info("Inserted %d rows into %s", len(rows), RESULTS_TABLE)
 
-    # Upstream-aligned copy, additive. Contained: results_v3 is what the HUD reads today, so
-    # a failure here must never cost those rows -- and an absent table is the normal state
-    # until the DDL lands, not an error.
-    if v2_run_id_value:
-        try:
-            if client.command(f"EXISTS TABLE {VLLM_V3_TABLE}"):
-                v2_rows = to_vllm_v3_rows(rows, v2_run_id_value)
-                v2_cols = list(v2_rows[0].keys())
-                client.insert(
-                    VLLM_V3_TABLE,
-                    [[r[c] for c in v2_cols] for r in v2_rows],
-                    column_names=v2_cols,
-                )
-                log.info(
-                    "Inserted %d rows into %s under run_id=%s",
-                    len(v2_rows),
-                    VLLM_V3_TABLE,
-                    v2_run_id_value,
-                )
-                _write_artifact_results(client, v2_rows, v2_run_id_value, rpm_lock, arch)
-                _write_v2_benchmarks(client, v2_rows, v2_run_id_value)
-            else:
-                log.info("%s absent — upstream-shaped rows skipped", VLLM_V3_TABLE)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("%s write failed, %s unaffected: %r", VLLM_V3_TABLE, RESULTS_TABLE, exc)
+    # v2 rows, additive. One client serves both generations, so every v2 statement is
+    # QUALIFIED with this database name; "" means v2 is not configured and the write is a
+    # clean no-op rather than an error.
+    v2db = target_database()
+    if v2_run_id_value and v2db:
+        _write_artifact_results(client, v2db, rows, v2_run_id_value, rpm_lock, arch)
+        _write_v2_benchmarks(client, v2db, rows, v2_run_id_value)
+    elif v2_run_id_value:
+        log.warning(
+            "CLICKHOUSE_DB_V2 unset — v2 perf rows skipped, %s still written", RESULTS_TABLE
+        )
     else:
         # Loud: without a run_id the perf numbers cannot reach an artifact, and a blank
         # artifact page reads as "no perf ran" rather than "not linked".
         log.warning(
             "no v2 run_id (pass --v2-run-id on Jenkins, or --run-id + --arch on Actions) "
-            "— upstream-shaped rows skipped, %s still written",
+            "— v2 perf rows skipped, %s still written",
             RESULTS_TABLE,
         )
 

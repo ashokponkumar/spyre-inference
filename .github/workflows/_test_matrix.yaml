@@ -144,6 +144,8 @@ on:
         required: false
       CLICKHOUSE_DB:
         required: false
+      CLICKHOUSE_DB_V2:
+        required: false
 
 defaults:
   run:
@@ -1117,3 +1119,4 @@ jobs:
           clickhouse-user: ${{ secrets.CLICKHOUSE_USER }}
           clickhouse-pass: ${{ secrets.CLICKHOUSE_PASS }}
           clickhouse-db: ${{ secrets.CLICKHOUSE_DB }}
+          clickhouse-db-v2: ${{ secrets.CLICKHOUSE_DB_V2 }}

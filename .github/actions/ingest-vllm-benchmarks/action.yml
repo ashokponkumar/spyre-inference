@@ -85,6 +85,14 @@ inputs:
     description: ClickHouse database.
     required: false
     default: ''
+  clickhouse-db-v2:
+    description: >-
+      Schema-v2 database NAME, not a second connection: one instance holds both
+      generations, so the same client serves both provided every v2 statement is
+      qualified. Empty makes the v2 write (benchmarks / benchmark_runs / the artifact
+      link) a clean no-op, leaving results_v3 and run_metadata untouched.
+    required: false
+    default: ''
 
 runs:
   using: composite
@@ -127,7 +135,7 @@ runs:
         uv venv "${RUNNER_TEMP}/ingest-venv"
         source "${RUNNER_TEMP}/ingest-venv/bin/activate"
         uv pip install clickhouse-connect
-        # Shared v2 identity (run_id / benchmark_id namespace) lives in torch-spyre.
+        # Shared v2 identity, schema model and write path live in torch-spyre.
         uv pip install \
           "git+https://github.com/torch-spyre/torch-spyre@main#subdirectory=extensions/clickhouse-ingest"
 
@@ -143,11 +151,13 @@ runs:
         CH_PORT_IN: ${{ inputs.clickhouse-port }}
         CH_USER_IN: ${{ inputs.clickhouse-user }}
         CH_DB_IN: ${{ inputs.clickhouse-db }}
+        CH_DB_V2_IN: ${{ inputs.clickhouse-db-v2 }}
       run: |
         source "${RUNNER_TEMP}/ingest-venv/bin/activate"
         [ -n "${CH_PORT_IN}" ] && export CLICKHOUSE_PORT="${CH_PORT_IN}"
         [ -n "${CH_USER_IN}" ] && export CLICKHOUSE_USER="${CH_USER_IN}"
         [ -n "${CH_DB_IN}" ] && export CLICKHOUSE_DB="${CH_DB_IN}"
+        [ -n "${CH_DB_V2_IN}" ] && export CLICKHOUSE_DB_V2="${CH_DB_V2_IN}"
         # Invoke by path: the script's own directory is sys.path[0], so its
         # sibling `from utils import ...` resolves without extra PYTHONPATH.
         python3 .github/scripts/ingest_vllm_benchmarks.py \

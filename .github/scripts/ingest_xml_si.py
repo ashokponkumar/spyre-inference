@@ -41,16 +41,16 @@ from pathlib import Path
 
 from lxml import etree
 from spyre_clickhouse_ingest import (
+    cases_already_ingested,
+    component_of,
     extract_properties,
     get_client,
-    insert_v2,
+    insert_test_results,
     promote_xpass,
-    v2_already_ingested,
-    v2_component,
-    v2_database,
-    v2_run_id_for,
-    v2_source_and_external_run_id,
-    v2_tables_present,
+    run_id_for,
+    source_and_external_run_id,
+    tables_present,
+    target_database,
 )
 
 # ---------------------------------------------------------------------------
@@ -333,13 +333,7 @@ def _threaded_run_id(args) -> str:
 # The product this script ingests for. Replaces v1's hf_/si_ table-name prefixes: one
 # v2 table pair serves all three products, discriminated by this column. It is also a
 # test_case_id hash input, so it cannot drift from the identity it is stamped on.
-V2_COMPONENT_DEFAULT = "spyre-inference"
-
-
-def _v2_norm(value) -> str:
-    """Canonical scalar form. Lowercasing is not cosmetic: the same tier arrives as
-    'Regression' from a Jenkins parameter and 'regression' from a GHA input."""
-    return ("" if value is None else str(value)).strip().lower()
+COMPONENT_DEFAULT = "spyre-inference"
 
 
 def _leg_arch(xml_path: Path) -> str:
@@ -396,7 +390,7 @@ def main():
         "the run_id hash, so a wrong value mints an id that joins to nothing: pass it "
         "explicitly whenever the ingest does not run on the test host (the workflow_run "
         "ingest does not -- it is pinned to x86_64). The default is the INGEST host's arch, "
-        "correct only for a direct run. An empty value makes v2_run_id refuse to derive an "
+        "correct only for a direct run. An empty value makes run_id_of refuse to derive an "
         "id, so every row lands unjoinable.",
     )
     parser.add_argument(
@@ -447,8 +441,8 @@ def main():
     )
     client = get_client()
     # One client, both generations: v2 is reached by QUALIFYING every statement with this
-    # database name (see v2_database). "" means v2 is not configured.
-    v2db = v2_database() if args.write_v2 else ""
+    # database name (see target_database). "" means v2 is not configured.
+    v2db = target_database() if args.write_v2 else ""
     if args.write_v2 and not v2db:
         print(
             "  WARN --schema asked for v2 but CLICKHOUSE_DB_V2 is unset — v2 rows skipped",
@@ -493,7 +487,7 @@ def main():
         # Jenkins/standalone leg, so it's only an independent signal for a GHA numeric id.
         runner_run_id = _runner_run_id(args, run_id)
         # v1-table reads, so gated on v1 being written. v2 dedups against its own
-        # table via v2_already_ingested(run_id, component).
+        # table via cases_already_ingested(run_id, component).
         if args.write_v1:
             existing = client.query(
                 "SELECT count() FROM si_test_runs "
@@ -526,16 +520,16 @@ def main():
         # authoritative, so the experimental write is contained rather than allowed to
         # abort the loop and drop every remaining file's v1 insert.
         try:
-            if v2db and v2_tables_present(client, v2db):
-                _v2_source, _v2_ext = v2_source_and_external_run_id(args, run_id)
+            if v2db and tables_present(client, v2db):
+                _v2_source, _v2_ext = source_and_external_run_id(args, run_id)
                 _v2_tier = (getattr(args, "trigger_type", "") or "").strip()
                 _v2_arch = (
                     _leg_arch(xml_path) or args.platform or run.get("platform") or ""
                 ).strip()
-                _v2_run_id = v2_run_id_for(args, run_id, _v2_arch, _v2_tier)
+                _v2_run_id = run_id_for(args, run_id, _v2_arch, _v2_tier)
                 # Resolved once: the dedup probe and the insert must agree, since
                 # component hashes into test_case_id.
-                _v2_comp = v2_component(args, V2_COMPONENT_DEFAULT)
+                _v2_comp = component_of(args, COMPONENT_DEFAULT)
                 if not _v2_run_id:
                     # Loud, because a blank run_id means these cases reach v2 unjoinable
                     # to any artifact -- and that reads downstream as "no tests ran".
@@ -545,10 +539,12 @@ def main():
                         f"tier={_v2_tier!r}); --trigger-type is the field usually missing",
                         file=sys.stderr,
                     )
-                elif v2_already_ingested(client, v2db, _v2_run_id, _v2_comp, xml_path.name):
+                elif cases_already_ingested(client, v2db, _v2_run_id, _v2_comp, xml_path.name):
                     print(f"  v2: already ingested run_id={_v2_run_id} — skipping")
                 else:
-                    _n = insert_v2(client, v2db, _v2_comp, _v2_run_id, cases, xml_path.name)
+                    _n = insert_test_results(
+                        client, v2db, _v2_comp, _v2_run_id, cases, xml_path.name
+                    )
                     print(f"  v2: {_n} test_case_runs under run_id={_v2_run_id}")
         except Exception as _v2_err:
             print(f"  [warn] v2 write failed, v1 unaffected: {_v2_err!r}", file=sys.stderr)
