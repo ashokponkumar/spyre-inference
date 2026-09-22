@@ -39,8 +39,10 @@ from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 
+from ingest_identity import golden_drift, library_provenance
 from lxml import etree
 from spyre_clickhouse_ingest import (
+    case_id_for,
     cases_already_ingested,
     component_of,
     extract_properties,
@@ -48,6 +50,7 @@ from spyre_clickhouse_ingest import (
     insert_test_results,
     promote_xpass,
     run_id_for,
+    run_id_of,
     source_and_external_run_id,
     tables_present,
     target_database,
@@ -335,6 +338,18 @@ def _threaded_run_id(args) -> str:
 # test_case_id hash input, so it cannot drift from the identity it is stamped on.
 COMPONENT_DEFAULT = "spyre-inference"
 
+# The two identities this script writes, pinned as literals against the library that mints
+# them. Installed from a floating `@main`, so the job that WRITES has to check them --
+# ingest_identity says why the test-time goldens are not enough.
+IDENTITY_GOLDENS = (
+    (run_id_of, ("gha", "123", "x86_64", "regression"), "1a6080e8-d061-547f-ab63-1af99b18ad0c"),
+    (
+        case_id_for,
+        ("torch-spyre", "test_ops", "test_add", ["testtype__trunk", "platform__x86_64"]),
+        "2f0e2626-3b33-56c7-9019-fb261450c7aa",
+    ),
+)
+
 
 def _leg_arch(xml_path: Path) -> str:
     """The arch recorded beside this leg's XML by run-matrix-config, or "".
@@ -448,6 +463,21 @@ def main():
             "  WARN --schema asked for v2 but CLICKHOUSE_DB_V2 is unset — v2 rows skipped",
             file=sys.stderr,
         )
+    if v2db:
+        # Printed whether or not it drifted: this is what attributes a row to the code that
+        # wrote it once `main` has moved past it.
+        print(f"  v2 identity: {library_provenance()}")
+        drift = golden_drift(IDENTITY_GOLDENS)
+        if drift:
+            # ::error:: so it is an annotation, not a line in a 10k-line log. v1 still runs:
+            # the drift costs v2 visibility, and writing ids nothing else can join costs more.
+            print(
+                "::error::v2 skipped — the shared identity library no longer mints the ids "
+                "this ingest was built against, so its rows would not join any other "
+                f"writer's: {'; '.join(drift)}",
+                file=sys.stderr,
+            )
+            v2db = ""
     client.command("SELECT 1")
     print("Connected.\n")
 

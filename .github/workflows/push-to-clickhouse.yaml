@@ -95,6 +95,7 @@ jobs:
         with:
           sparse-checkout: |
             .github/scripts/ingest_xml_si.py
+            .github/scripts/ingest_identity.py
           sparse-checkout-cone-mode: false
 
       - name: Install uv

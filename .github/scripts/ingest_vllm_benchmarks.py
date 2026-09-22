@@ -32,8 +32,10 @@ from argparse import ArgumentParser
 from typing import Any
 
 import clickhouse_connect
+from ingest_identity import golden_drift, library_provenance
 from spyre_clickhouse_ingest import (
     artifact_id_for,
+    benchmark_id_for,
     benchmarks_already_ingested,
     canonical_arch,
     insert_benchmarks,
@@ -572,6 +574,37 @@ _BENCH_TABLES = (schema.BENCHMARKS, schema.BENCHMARK_RUNS)
 # same-named benchmark in another producer's suite.
 _BENCH_ID_KEYS = ("record_type", "run_mode", "tensor_parallel", "input_len", "output_len")
 
+# The three identities this script writes, pinned as literals against the library that mints
+# them. Installed from a floating `@main`, so the job that WRITES has to check them --
+# ingest_identity says why the test-time goldens are not enough. run_id and artifact_id are
+# the cross-writer contract; benchmark_id is this producer's own, and pinned for the same
+# reason: benchmarks dedups across runs on it, so a re-key silently forks every trend line.
+IDENTITY_GOLDENS = (
+    (run_id_of, ("gha", "12345", "amd64", "integration"), "dab2a67f-14bf-53be-b6e4-fc9642086e47"),
+    (
+        artifact_id_for,
+        ("torch-spyre", "flex-rpm", "abc123def456", "amd64"),
+        "86a5c6e3-bd2f-5d27-9a8f-9b8d23efc65b",
+    ),
+    (
+        benchmark_id_for,
+        (
+            BENCH_COMPONENT,
+            "latency_tp1_in64_out64",
+            [],
+            {
+                "record_type": "model",
+                "run_mode": "latency",
+                "tensor_parallel": "1",
+                "input_len": "64",
+                "output_len": "64",
+            },
+            _BENCH_ID_KEYS,
+        ),
+        "f07dc029-26b3-51d2-8109-7e32e0edc1b7",
+    ),
+)
+
 # The MV cannot see the CI coordinates, so it reads them off benchmark_runs.props; guessing
 # them downstream would put a wrong commit on a chart.
 _RUN_PROP_COLUMNS = ("repo", "head_branch", "workflow_id", "run_attempt", "job_id")
@@ -698,12 +731,32 @@ def insert_to_clickhouse(
     # QUALIFIED with this database name; "" means v2 is not configured and the write is a
     # clean no-op rather than an error.
     v2db = target_database()
+    if v2db and v2_run_id_value:
+        # Logged whether or not it drifted: this is what attributes a row to the code that
+        # wrote it once `main` has moved past it.
+        log.info("v2 identity: %s", library_provenance())
+        drift = golden_drift(IDENTITY_GOLDENS)
+        if drift:
+            # ::error:: so it is an annotation, not a line in a 10k-line log. results_v3 and
+            # run_metadata still go in: the drift costs v2 visibility, and writing ids
+            # nothing else can join costs more.
+            print(
+                "::error::v2 skipped — the shared identity library no longer mints the ids "
+                "this ingest was built against, so its rows would not join any other "
+                f"writer's: {'; '.join(drift)}",
+                file=sys.stderr,
+            )
+            v2db = ""
     if v2_run_id_value and v2db:
         _write_artifact_results(client, v2db, rows, v2_run_id_value, rpm_lock, arch)
         _write_v2_benchmarks(client, v2db, rows, v2_run_id_value)
     elif v2_run_id_value:
+        # Cause-agnostic: a drift has already said its piece as an ::error:: above, and this
+        # is the only report when the database is simply not configured.
         log.warning(
-            "CLICKHOUSE_DB_V2 unset — v2 perf rows skipped, %s still written", RESULTS_TABLE
+            "no v2 database (CLICKHOUSE_DB_V2 unset, or the identity drift above) — "
+            "v2 perf rows skipped, %s still written",
+            RESULTS_TABLE,
         )
     else:
         # Loud: without a run_id the perf numbers cannot reach an artifact, and a blank
