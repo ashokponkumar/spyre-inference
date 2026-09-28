@@ -345,6 +345,8 @@ def extract_rows(
     # inject the model into the native JSON at run time (run_vllm_benchmarks.py).
     model_by_test: dict[str, str] = {}
     pytorch_metrics: dict[str, set[str]] = {}
+    # Kept apart from the rows: a native record whose metrics all dedup away still has an n.
+    samples_by_test: dict[str, int] = {}
 
     for file, extractor in [
         *[(f, extract_pytorch_metrics) for f in sorted(pytorch_files)],
@@ -378,6 +380,8 @@ def extract_rows(
                 model = model_by_test[test_name]
             covered = pytorch_metrics.setdefault(test_name, set())
             n = 0 if is_pytorch else sample_count(record)
+            if n:
+                samples_by_test.setdefault(test_name, n)
             for metric_name, value in extractor(record):
                 if is_pytorch:
                     covered.add(metric_name)
@@ -390,6 +394,19 @@ def extract_rows(
             log.info("Extracted %d rows from %s", extracted, filename)
         else:
             log.warning("No usable metrics in %s", filename)
+
+    counted = set()
+    for r in rows:
+        extra = json.loads(r["extra"])
+        if extra.get("iterations"):
+            counted.add(extra.get("test_name"))
+    for r in rows:
+        extra = json.loads(r["extra"])
+        name = extra.get("test_name")
+        if name in samples_by_test and name not in counted:
+            extra["iterations"] = samples_by_test[name]
+            r["extra"] = json.dumps(extra)
+            counted.add(name)
 
     log.info("Total rows extracted: %d", len(rows))
     return rows
@@ -482,6 +499,10 @@ def _write_artifact_results(client, db: str, rows, run_id_value: str, leg) -> No
     Contained: a failure here must not cost the benchmark rows already written.
     """
     try:
+        tables = (schema.ARTIFACTS, schema.ARTIFACT_RESULTS)
+        if not tables_present(client, db, tables=tables):
+            log.info("artifacts/artifact_results absent in %s — artifact link skipped", db)
+            return
         base = base_artifact_id()
         if not base:
             # Nothing to chain onto; a coordinate invented here would be shared by every such leg.

@@ -272,6 +272,28 @@ def test_a_metric_in_both_files_is_stored_once(mod, monkeypatch, tmp_path):
     assert fact["iterations"] == 1
 
 
+def test_iterations_survive_when_every_native_metric_dedups_away(mod, monkeypatch, tmp_path):
+    rows = _extract(
+        mod,
+        monkeypatch,
+        tmp_path,
+        {
+            "throughput_x.pytorch.json": [
+                _pytorch("requests_per_second", [2.0]),
+                _pytorch("tokens_per_second", [280.0]),
+            ],
+            "throughput_x.json": {
+                "num_requests": 16,
+                "requests_per_second": 2.0,
+                "tokens_per_second": 280.0,
+            },
+        },
+    )
+    _idents, (fact,) = _write(mod, rows)
+    assert set(fact["measurements"]) == {"requests_per_second", "tokens_per_second"}
+    assert fact["iterations"] == 1
+
+
 def test_native_adds_only_what_pytorch_lacks(mod, monkeypatch, tmp_path):
     rows = _extract(
         mod,
@@ -358,9 +380,10 @@ def test_run_id_and_report_kind_are_stamped_on_every_fact_row(mod):
 _BASE = "6ecddb3f-1809-533f-9552-fafdba8a331d"
 
 
-def _artifact_write(mod, rows, monkeypatch, base=_BASE, **leg):
+def _artifact_write(mod, rows, monkeypatch, base=_BASE, tables=True, **leg):
     """Run the real _write_artifact_results over these flat rows; return what it inserted."""
     monkeypatch.setattr(mod, "base_artifact_id", lambda *a, **k: base)
+    monkeypatch.setattr(mod, "tables_present", lambda *a, **k: tables)
     fields = dict(
         sha="abc123def4567890",
         rpm_lock="",
@@ -399,6 +422,13 @@ def test_leg_writes_its_artifact_and_a_performance_verdict(mod, monkeypatch):
 
 def test_no_base_id_means_no_link(mod, monkeypatch):
     assert _artifact_write(mod, [_flat()], monkeypatch, base="") == {}
+
+
+def test_missing_artifact_tables_skip_the_link_quietly(mod, monkeypatch, caplog):
+    with caplog.at_level("INFO"):
+        assert _artifact_write(mod, [_flat()], monkeypatch, tables=False) == {}
+    assert "artifact link skipped" in caplog.text
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
 
 
 def test_artifact_results_duration_sums_elapsed_time_rows(mod, monkeypatch):
