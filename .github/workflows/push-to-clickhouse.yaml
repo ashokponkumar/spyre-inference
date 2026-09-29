@@ -233,6 +233,16 @@ jobs:
           echo "Threaded run_id: ${RID:-<none, ingest will derive from the run coordinate>}"
           echo "run_id=${RID}" >> "${GITHUB_OUTPUT}"
 
+      # Uploaded by _test_matrix's artifact_identity job and downloaded with the XML above.
+      # Absent (unadopted run, image with no stamped id) makes the v2 ingest write cases only.
+      - name: Resolve this run's artifact_id
+        id: leg-artifact-id
+        run: |
+          REC="$(tr -d '[:space:]' < xml_artifacts/artifact-id/artifact-id.txt 2>/dev/null || true)"
+          LEG_AID="${REC%%|*}"
+          echo "Leg artifact_id: ${LEG_AID:-<none, no artifact rows>}"
+          echo "value=${REC}" >> "${GITHUB_OUTPUT}"
+
       - name: Resolve test_type for trigger_type
         id: extract-tier
         run: |
@@ -353,6 +363,9 @@ jobs:
           sha: ${{ env.TRIGGERING_SHA }}
           run-id: ${{ steps.resolve-run-id.outputs.run_id }}
           gha-run-id: ${{ env.TRIGGERING_RUN_ID }}
+          # x86_64 only: the record describes the x86_64 image every matrix leg runs on.
+          artifact-id: ${{ steps.leg-artifact-id.outputs.value }}
+          repository: ${{ github.repository }}
           triggered-at: ${{ env.TRIGGERING_AT }}
           pr-number: ${{ steps.resolve-pr.outputs.pr_number }}
           trigger-type: ${{ steps.extract-tier.outputs.tier }}
