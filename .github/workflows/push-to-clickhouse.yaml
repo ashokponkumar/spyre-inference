@@ -25,6 +25,12 @@ on:
         description: Workflow name (integration-tests | test_each_commit)
         required: false
         default: integration-tests
+      display_title:
+        description: >-
+          Run-name of the run being re-ingested ("regression", "trunk" or
+          "integration-tests (<test_type>)"). The tier comes from it, and v2 skips a run without one.
+        required: false
+        default: ''
 
 concurrency:
   # Allow at most one ingest per triggering run (re-runs queue behind)
@@ -73,7 +79,7 @@ jobs:
       # workflow's run-name, or the bare tier ("trunk" / "regression") via
       # test_each_commit's -- the only way this job can recover which tier
       # ran without an extra API call.
-      TRIGGERING_DISPLAY_TITLE: ${{ github.event.workflow_run.display_title || '' }}
+      TRIGGERING_DISPLAY_TITLE: ${{ github.event.workflow_run.display_title || inputs.display_title || '' }}
       # Triggering event (push/pull_request/schedule/workflow_dispatch/merge_group; empty on manual re-ingest) -- gates the PR-number lookup below.
       TRIGGERING_EVENT: ${{ github.event.workflow_run.event || '' }}
 
@@ -236,20 +242,14 @@ jobs:
       - name: Resolve test_type for trigger_type
         id: extract-tier
         run: |
-          if [[ "${TRIGGERING_WORKFLOW}" == "test_each_commit" ]]; then
-            # test_each_commit's run-name IS the external-facing tier name
-            # itself ("trunk" on push, "regression" otherwise) -- no parens
-            # to parse out.
-            TIER="${TRIGGERING_DISPLAY_TITLE}"
-          else
-            # integration-tests' run-name is deliberately
-            # "integration-tests (<inputs.test_type>)" -- the RAW test_type
-            # value the caller passed (e.g. "integration" / "regression" /
-            # "trunk"); there is no internal alias vocabulary to resolve
-            # through (see _test_matrix.yaml's test_type description) -- so
-            # parsing it out of display_title recovers the real external-
-            # facing value without an extra API call.
+          # Keyed on the title's shape, not TRIGGERING_WORKFLOW: workflow_run.name carries the
+          # run-name, so it is never "test_each_commit".
+          if [[ "${TRIGGERING_DISPLAY_TITLE}" == *"("*")"* ]]; then
+            # integration-tests: "integration-tests (<inputs.test_type>)".
             TIER=$(echo "${TRIGGERING_DISPLAY_TITLE}" | sed -n 's/.*(\(.*\))\s*$/\1/p')
+          else
+            # test_each_commit: the bare tier ("trunk" on push, "regression" otherwise).
+            TIER="${TRIGGERING_DISPLAY_TITLE}"
           fi
           echo "Resolved test_type: ${TIER:-<none>}"
           echo "tier=${TIER}" >> "${GITHUB_OUTPUT}"
