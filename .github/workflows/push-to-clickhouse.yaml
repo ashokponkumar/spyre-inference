@@ -183,6 +183,7 @@ jobs:
           echo "$ARTIFACTS" | python3 -c "import json,sys; [print(' •', a['name']) for a in json.load(sys.stdin)]"
 
       - name: Download XML artifacts
+        id: download-artifacts
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -192,7 +193,13 @@ jobs:
           import json, os, subprocess, sys
           from pathlib import Path
 
-          artifacts = json.loads(os.environ['ARTIFACTS'])
+          # Only the JUnit reports and the id sidecars are read below. Skipping the rest
+          # (coverage, durations, failed-suite) keeps one broken download from failing the ingest.
+          ID_ARTIFACTS = {"run-id", "orchestrator-run-id", "artifact-id"}
+          artifacts = [
+              a for a in json.loads(os.environ['ARTIFACTS'])
+              if a['name'].startswith("junit-") or a['name'] in ID_ARTIFACTS
+          ]
           repo  = os.environ['GITHUB_REPOSITORY']
           for a in artifacts:
               print(f"Downloading: {a['name']} (id={a['id']})")
