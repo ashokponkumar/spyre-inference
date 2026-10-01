@@ -195,7 +195,7 @@ jobs:
 
           # Only the JUnit reports and the id sidecars are read below. Skipping the rest
           # (coverage, durations, failed-suite) keeps one broken download from failing the ingest.
-          ID_ARTIFACTS = {"run-id", "orchestrator-run-id", "artifact-id"}
+          ID_ARTIFACTS = {"run-id", "artifact-id"}
           artifacts = [
               a for a in json.loads(os.environ['ARTIFACTS'])
               if a['name'].startswith("junit-") or a['name'] in ID_ARTIFACTS
