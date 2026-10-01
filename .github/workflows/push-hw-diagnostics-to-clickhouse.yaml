@@ -82,20 +82,11 @@ jobs:
 
       # run_id, tier and artifact_id resolved as push-to-clickhouse.yaml resolves them, so these
       # rows share the leg's run_id and join its cases and artifact verdict.
-      - name: Recover threaded run_id (test_each_commit)
+      - name: Recover threaded run_id
         id: run-id
         uses: ./.github/actions/recover-threaded-run-id
         with:
           triggering-run-id: ${{ env.TRIGGERING_RUN_ID }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Recover threaded run_id (integration-tests)
-        id: orchestrator-run-id
-        if: steps.run-id.outputs.run_id == ''
-        uses: ./.github/actions/recover-threaded-run-id
-        with:
-          triggering-run-id: ${{ env.TRIGGERING_RUN_ID }}
-          artifact-name: orchestrator-run-id
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Recover this run's artifact_id
@@ -125,7 +116,7 @@ jobs:
           gha-run-id: ${{ env.TRIGGERING_RUN_ID }}
           workflow-name: ${{ env.TRIGGERING_WORKFLOW }}
           trigger-type: ${{ steps.extract-tier.outputs.tier }}
-          threaded-run-id: ${{ steps.run-id.outputs.run_id || steps.orchestrator-run-id.outputs.run_id }}
+          threaded-run-id: ${{ steps.run-id.outputs.run_id }}
           artifact-id: ${{ steps.leg-artifact-id.outputs.value }}
           component: ${{ env.INGEST_COMPONENT }}
           arch: ${{ env.LEG_ARCH }}
