@@ -302,8 +302,8 @@ runs:
         CFG: ${{ inputs.cfg }}
         NEW_XML: junit-${{ inputs.test_target }}.xml
         REPLACED_XML: ${{ runner.temp }}/replaced-junit/junit-${{ inputs.test_target }}.xml
-        # Stdlib-only, so fetched by path rather than installed; pinned because it rewrites the report.
-        MARK_RETRIED_URL: https://raw.githubusercontent.com/torch-spyre/torch-spyre/7670d690e80a786ad7218fcf5d4abf7a2963406c/extensions/clickhouse-ingest/spyre_clickhouse_ingest/mark_retried.py
+        # Stdlib-only, so fetched by path rather than installed; @main, like the ingest that reads its marks.
+        MARK_RETRIED_URL: https://raw.githubusercontent.com/torch-spyre/torch-spyre/main/extensions/clickhouse-ingest/spyre_clickhouse_ingest/mark_retried.py
       run: |
         warn() {
           echo "::warning::$1"
