@@ -146,6 +146,9 @@ on:
         required: false
       CLICKHOUSE_DB_V2:
         required: false
+      # Public-model cache steps only; empty on fork PRs (anonymous download).
+      HF_TOKEN:
+        required: false
 
 defaults:
   run:
@@ -781,6 +784,7 @@ jobs:
           artifactory_api_key: ${{ secrets.ARTIFACTORY_TOKEN }}
           artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
           artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
+          hf_token: ${{ secrets.HF_TOKEN }}
 
       # Records this leg's matrix entry as a uniquely-named artifact so collect_failed_suites can rebuild a retry matrix without needing this job's own (continue-on-error-muddied) conclusion.
       - name: Save suite descriptor for pod-level retry
@@ -869,6 +873,7 @@ jobs:
           artifactory_api_key: ${{ secrets.ARTIFACTORY_TOKEN }}
           artifactory_base_url: ${{ secrets.ARTIFACTORY_BASE_URL }}
           artifactory_rpm_path: ${{ secrets.ARTIFACTORY_RPM_PATH }}
+          hf_token: ${{ secrets.HF_TOKEN }}
 
   # Test matrix result: decides pass/fail for the `test` matrix (continue-on-error, so always reports "success" itself) by inspecting the pod-level retry outcome; this job's own result is what determines the reusable workflow's overall conclusion.
   test_result:
@@ -1144,6 +1149,8 @@ jobs:
       - name: Ensure public HF models cached
         env:
           HF_HUB_OFFLINE: '0'
+          # Authenticated cache-miss downloads; anonymous Hub requests get rate-limited.
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: uv run .github/cache_config/manage_cache.py --public
 
       - name: Run vLLM benchmarks
