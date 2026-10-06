@@ -304,7 +304,7 @@ runs:
         NEW_XML: junit-${{ inputs.test_target }}.xml
         REPLACED_XML: ${{ runner.temp }}/replaced-junit/junit-${{ inputs.test_target }}.xml
         # Stdlib-only, so fetched by path rather than installed; pinned because it rewrites the report.
-        MARK_RETRIED_URL: https://raw.githubusercontent.com/torch-spyre/torch-spyre/ea6c5a1086ed27e630df804179b3eba9596bb2ff/tests/oot_framework/utils/mark_retried.py
+        MARK_RETRIED_URL: https://raw.githubusercontent.com/torch-spyre/torch-spyre/7670d690e80a786ad7218fcf5d4abf7a2963406c/extensions/clickhouse-ingest/spyre_clickhouse_ingest/mark_retried.py
       run: |
         warn() {
           echo "::warning::$1"
