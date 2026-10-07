@@ -361,7 +361,7 @@ jobs:
           run-id: ${{ steps.resolve-run-id.outputs.run_id }}
           gha-run-id: ${{ env.TRIGGERING_RUN_ID }}
           # x86_64 only: the record describes the x86_64 image every matrix leg runs on.
-          artifact-id: ${{ steps.leg-artifact-id.outputs.value }}
+          artifact: ${{ steps.leg-artifact-id.outputs.value && format('gha:{0}', steps.leg-artifact-id.outputs.value) || '' }}
           repository: ${{ github.repository }}
           triggered-at: ${{ env.TRIGGERING_AT }}
           pr-number: ${{ steps.resolve-pr.outputs.pr_number }}
