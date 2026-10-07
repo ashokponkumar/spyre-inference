@@ -38,7 +38,7 @@ from spyre_clickhouse_ingest import (
     base_artifact_id,
     benchmark_id_for,
     benchmarks_already_ingested,
-    ensure_artifact,
+    ensure,
     gha_artifact_id,
     insert_artifact_result,
     insert_benchmarks,
@@ -514,7 +514,7 @@ def _write_artifact_results(client, db: str, rows, run_id_value: str, leg) -> No
         repo, gha = leg.repository, leg.gha_run_id
         run_url = f"https://github.com/{repo}/actions/runs/{gha}" if repo and gha else ""
         # The derive-gha-artifact-id record, so the leg registers as every GHA leg does.
-        ensure_artifact(
+        ensure(
             client,
             db,
             f"gha:{aid}|{base}|{installed}",
