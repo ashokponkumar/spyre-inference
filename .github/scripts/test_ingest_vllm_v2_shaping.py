@@ -408,6 +408,7 @@ def test_leg_writes_its_artifact_and_a_performance_verdict(mod, monkeypatch):
     assert artifact["component"] == "spyre-inference"
     assert artifact["props"]["base_artifact_id"] == _BASE
     assert artifact["props"]["installed"] == "spyre-inference@abc123def456"
+    assert (artifact["identity_deps"], artifact["props"]["source"]) == ([f"base={_BASE}"], "gha")
     assert result["artifact_id"] == artifact["artifact_id"] != _BASE
     assert (result["run_id"], result["result_kind"], result["test_type"]) == (
         _RUN,
