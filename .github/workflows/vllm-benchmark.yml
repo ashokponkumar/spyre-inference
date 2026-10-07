@@ -226,11 +226,11 @@ jobs:
           CLICKHOUSE_DB: ${{ inputs.clickhouse_env != 'dev' && secrets.CLICKHOUSE_DB || secrets.CLICKHOUSE_DB_DEV }}
           CLICKHOUSE_DB_V2: ${{ inputs.clickhouse_env != 'dev' && secrets.CLICKHOUSE_DB_V2 || secrets.CLICKHOUSE_DB_V2_DEV }}
           # v2's own connection; never reads the other instance's secret.
-          CLICKHOUSE_V2_HOST: ${{ inputs.clickhouse_env != 'dev' && secrets.CLICKHOUSE_V2_HOST || inputs.clickhouse_env == 'dev' && secrets.CLICKHOUSE_V2_HOST_DEV || '' }}
-          CLICKHOUSE_V2_PORT: ${{ inputs.clickhouse_env != 'dev' && secrets.CLICKHOUSE_V2_PORT || inputs.clickhouse_env == 'dev' && secrets.CLICKHOUSE_V2_PORT_DEV || '' }}
-          CLICKHOUSE_V2_USER: ${{ inputs.clickhouse_env != 'dev' && secrets.CLICKHOUSE_V2_USER || inputs.clickhouse_env == 'dev' && secrets.CLICKHOUSE_V2_USER_DEV || '' }}
-          CLICKHOUSE_V2_PASS: ${{ inputs.clickhouse_env != 'dev' && secrets.CLICKHOUSE_V2_PASS || inputs.clickhouse_env == 'dev' && secrets.CLICKHOUSE_V2_PASS_DEV || '' }}
-          CLICKHOUSE_V2_DB: ${{ inputs.clickhouse_env != 'dev' && secrets.CLICKHOUSE_V2_DB || inputs.clickhouse_env == 'dev' && secrets.CLICKHOUSE_V2_DB_DEV || '' }}
+          CH_V2_HOST: ${{ inputs.clickhouse_env != 'dev' && secrets.CLICKHOUSE_V2_HOST || inputs.clickhouse_env == 'dev' && secrets.CLICKHOUSE_V2_HOST_DEV || '' }}
+          CH_V2_PORT: ${{ inputs.clickhouse_env != 'dev' && secrets.CLICKHOUSE_V2_PORT || inputs.clickhouse_env == 'dev' && secrets.CLICKHOUSE_V2_PORT_DEV || '' }}
+          CH_V2_USER: ${{ inputs.clickhouse_env != 'dev' && secrets.CLICKHOUSE_V2_USER || inputs.clickhouse_env == 'dev' && secrets.CLICKHOUSE_V2_USER_DEV || '' }}
+          CH_V2_PASS: ${{ inputs.clickhouse_env != 'dev' && secrets.CLICKHOUSE_V2_PASS || inputs.clickhouse_env == 'dev' && secrets.CLICKHOUSE_V2_PASS_DEV || '' }}
+          CH_V2_DB: ${{ inputs.clickhouse_env != 'dev' && secrets.CLICKHOUSE_V2_DB || inputs.clickhouse_env == 'dev' && secrets.CLICKHOUSE_V2_DB_DEV || '' }}
           BENCHMARK_BRANCH: ${{ github.ref_name }}
           BENCHMARK_SHA: ${{ github.sha }}
           PR_NUMBER: "0"
@@ -252,9 +252,12 @@ jobs:
             exit 1
           fi
 
-          ingest() {
-            uv run python3 .github/scripts/ingest_vllm_benchmarks.py \
-            --schema "$1" \
+          if [[ -z "${CH_V2_HOST}" ]]; then
+            # v2 fallback onto the shared connection: remove once every repo has CLICKHOUSE_V2_*.
+            echo "::notice title=v2 ClickHouse::v2 written over the shared CLICKHOUSE_* secrets;" \
+                 "add CLICKHOUSE_V2_HOST/PORT/USER/PASS/DB to give v2 its own."
+          fi
+          uv run python3 .github/scripts/ingest_vllm_benchmarks.py \
             --results-dir benchmark-results \
             --workflow "vLLM Benchmark" \
             --branch "${BENCHMARK_BRANCH}" \
@@ -267,21 +270,6 @@ jobs:
             --rpm-lock "${RPM_LOCK}" \
             --state "${BENCH_STATE}" \
             --repository "${{ github.repository }}"
-          }
-          if [[ -z "${CLICKHOUSE_V2_HOST}" ]]; then
-            # v2 fallback onto the shared connection: remove once every repo has CLICKHOUSE_V2_*.
-            echo "::notice title=v2 ClickHouse::v2 written over the shared CLICKHOUSE_* secrets;" \
-                 "add CLICKHOUSE_V2_HOST/PORT/USER/PASS/DB to give v2 its own."
-            ingest both
-            exit 0
-          fi
-          # Its own connection is its own run: one process holds one client.
-          rc=0
-          ingest v1 || rc=$?
-          CLICKHOUSE_HOST="${CLICKHOUSE_V2_HOST}" CLICKHOUSE_PORT="${CLICKHOUSE_V2_PORT}" \
-            CLICKHOUSE_USER="${CLICKHOUSE_V2_USER}" CLICKHOUSE_PASS="${CLICKHOUSE_V2_PASS}" \
-            CLICKHOUSE_DB="${CLICKHOUSE_V2_DB}" CLICKHOUSE_DB_V2="${CLICKHOUSE_V2_DB}" ingest v2 || rc=$?
-          exit "${rc}"
 
       - name: Job Summary
         if: always()

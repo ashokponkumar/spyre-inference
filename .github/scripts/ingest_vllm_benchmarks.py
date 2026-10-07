@@ -131,12 +131,6 @@ def parse_args() -> Any:
         help="owner/name, for the run url and the artifact's sources.",
     )
     parser.add_argument(
-        "--schema",
-        choices=("v1", "v2", "both"),
-        default=os.environ.get("INGEST_SCHEMA") or "both",
-        help="Which generation to write. v2 alone is for a v2 database on its own connection.",
-    )
-    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="print rows instead of inserting into ClickHouse",
@@ -697,7 +691,6 @@ def insert_to_clickhouse(
     rows: list[dict[str, Any]],
     v2_run_id_value: str = "",
     leg: Any = None,
-    schema: str = "both",
 ) -> None:
     """Insert rows into ClickHouse using environment-configured connection."""
     clickhouse_env_vars = {
@@ -728,16 +721,30 @@ def insert_to_clickhouse(
         log.warning("No rows to insert")
         return
 
-    if schema != "v2":
-        columns = list(rows[0].keys())
-        data = [[row[col] for col in columns] for row in rows]
-        client.insert(RESULTS_TABLE, data, column_names=columns)
-        log.info("Inserted %d rows into %s", len(rows), RESULTS_TABLE)
+    columns = list(rows[0].keys())
+    data = [[row[col] for col in columns] for row in rows]
 
-    # v2 rows, additive. One client serves both generations, so every v2 statement is
-    # QUALIFIED with this database name; "" means v2 is not configured and the write is a
-    # clean no-op rather than an error.
-    v2db = target_database() if schema != "v1" else ""
+    client.insert(
+        RESULTS_TABLE,
+        data,
+        column_names=columns,
+    )
+    log.info("Inserted %d rows into %s", len(rows), RESULTS_TABLE)
+
+    # v2 rows, additive, QUALIFIED with this database name; "" means v2 is not configured and
+    # the write is a clean no-op rather than an error.
+    if os.environ.get("CH_V2_HOST"):
+        v2_client = clickhouse_connect.get_client(
+            host=os.environ["CH_V2_HOST"],
+            port=int(os.environ.get("CH_V2_PORT") or "8123"),
+            username=os.environ.get("CH_V2_USER") or "default",
+            password=os.environ.get("CH_V2_PASS", ""),
+            database=os.environ.get("CH_V2_DB", ""),
+        )
+        v2db = os.environ.get("CH_V2_DB", "").strip()
+    else:
+        # v2 over the v1 client: remove once every caller sets CH_V2_*.
+        v2_client, v2db = client, target_database()
     if v2db and v2_run_id_value:
         # Logged whether or not it drifted: this is what attributes a row to the code that
         # wrote it once `main` has moved past it.
@@ -756,8 +763,8 @@ def insert_to_clickhouse(
             v2db = ""
     if v2_run_id_value and v2db:
         if leg is not None:
-            _write_artifact_results(client, v2db, rows, v2_run_id_value, leg)
-        _write_v2_benchmarks(client, v2db, rows, v2_run_id_value)
+            _write_artifact_results(v2_client, v2db, rows, v2_run_id_value, leg)
+        _write_v2_benchmarks(v2_client, v2db, rows, v2_run_id_value)
     elif v2_run_id_value:
         # Cause-agnostic: a drift has already said its piece as an ::error:: above, and this
         # is the only report when the database is simply not configured.
@@ -799,7 +806,7 @@ def insert_to_clickhouse(
             }
         )
 
-    if metadata_rows and schema != "v2":
+    if metadata_rows:
         meta_columns = list(metadata_rows[0].keys())
         meta_data = [[r[col] for col in meta_columns] for r in metadata_rows]
         client.insert(METADATA_TABLE, meta_data, column_names=meta_columns)
@@ -836,9 +843,7 @@ def main() -> None:
             print(f"... and {len(rows) - 5} more")
         return
 
-    insert_to_clickhouse(
-        rows, resolve_v2_run_id(args), args if links_artifact(args) else None, args.schema
-    )
+    insert_to_clickhouse(rows, resolve_v2_run_id(args), args if links_artifact(args) else None)
 
 
 if __name__ == "__main__":
