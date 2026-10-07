@@ -92,10 +92,31 @@ inputs:
     default: ''
   clickhouse-db-v2:
     description: >-
-      Schema-v2 database NAME, not a second connection: one instance holds both
-      generations, so the same client serves both provided every v2 statement is
-      qualified. Empty makes the v2 write (benchmarks / benchmark_runs / the artifact
-      link) a clean no-op, leaving results_v3 and run_metadata untouched.
+      Schema-v2 database on the shared clickhouse-* connection; used only while
+      clickhouse-v2-host is empty. Empty makes the v2 write (benchmarks / benchmark_runs /
+      the artifact link) a no-op, leaving results_v3 and run_metadata untouched.
+    required: false
+    default: ''
+  clickhouse-v2-host:
+    description: >-
+      The v2 connection (secrets CLICKHOUSE_V2_HOST/PORT/USER/PASS/DB). Set, the v2 write uses
+      it in a run of its own; empty falls back to clickhouse-* + clickhouse-db-v2.
+    required: false
+    default: ''
+  clickhouse-v2-port:
+    description: v2 ClickHouse port.
+    required: false
+    default: ''
+  clickhouse-v2-user:
+    description: v2 ClickHouse user.
+    required: false
+    default: ''
+  clickhouse-v2-pass:
+    description: v2 ClickHouse password.
+    required: false
+    default: ''
+  clickhouse-v2-db:
+    description: The spyre_v2 database on the v2 connection.
     required: false
     default: ''
 
@@ -111,7 +132,7 @@ runs:
       id: gate
       shell: bash
       env:
-        CH_HOST: ${{ inputs.clickhouse-host }}
+        CH_HOST: ${{ inputs.clickhouse-host || inputs.clickhouse-v2-host }}
         RESULTS_DIR: ${{ inputs.results-dir }}
       run: |
         if [ -z "${CH_HOST}" ]; then
@@ -157,15 +178,29 @@ runs:
         CH_USER_IN: ${{ inputs.clickhouse-user }}
         CH_DB_IN: ${{ inputs.clickhouse-db }}
         CH_DB_V2_IN: ${{ inputs.clickhouse-db-v2 }}
+        V2_HOST: ${{ inputs.clickhouse-v2-host }}
+        V2_PORT: ${{ inputs.clickhouse-v2-port }}
+        V2_USER: ${{ inputs.clickhouse-v2-user }}
+        V2_PASS: ${{ inputs.clickhouse-v2-pass }}
+        V2_DB: ${{ inputs.clickhouse-v2-db }}
       run: |
         source "${RUNNER_TEMP}/ingest-venv/bin/activate"
         [ -n "${CH_PORT_IN}" ] && export CLICKHOUSE_PORT="${CH_PORT_IN}"
         [ -n "${CH_USER_IN}" ] && export CLICKHOUSE_USER="${CH_USER_IN}"
         [ -n "${CH_DB_IN}" ] && export CLICKHOUSE_DB="${CH_DB_IN}"
-        [ -n "${CH_DB_V2_IN}" ] && export CLICKHOUSE_DB_V2="${CH_DB_V2_IN}"
+        if [ -z "${V2_HOST}" ]; then
+          # v2 fallback onto the shared connection: remove once every repo has CLICKHOUSE_V2_*.
+          if [ -n "${CH_DB_V2_IN}" ]; then
+            echo "::notice title=v2 ClickHouse::v2 written over the shared CLICKHOUSE_* secrets;" \
+                 "add CLICKHOUSE_V2_HOST/PORT/USER/PASS/DB to give v2 its own."
+            export CLICKHOUSE_DB_V2="${CH_DB_V2_IN}"
+          fi
+        fi
         # Invoke by path: the script's own directory is sys.path[0], so its
         # sibling `from utils import ...` resolves without extra PYTHONPATH.
-        python3 .github/scripts/ingest_vllm_benchmarks.py \
+        ingest() {
+          python3 .github/scripts/ingest_vllm_benchmarks.py \
+          --schema "$1" \
           --results-dir "${{ inputs.results-dir }}" \
           --workflow "${{ inputs.workflow }}" \
           --branch "${{ inputs.branch }}" \
@@ -180,3 +215,21 @@ runs:
           --installed "${{ inputs.installed }}" \
           --state "${{ inputs.state }}" \
           --repository "${{ github.repository }}"
+        }
+        if [ -z "${V2_HOST}" ]; then
+          ingest both
+          exit
+        fi
+        # Its own connection is its own run: one process holds one client.
+        rc=0
+        if [ -n "${CLICKHOUSE_HOST}" ]; then
+          ingest v1 || rc=$?
+        fi
+        (
+          export CLICKHOUSE_HOST="${V2_HOST}" CLICKHOUSE_PASS="${V2_PASS}" \
+                 CLICKHOUSE_DB="${V2_DB}" CLICKHOUSE_DB_V2="${V2_DB}"
+          [ -n "${V2_PORT}" ] && export CLICKHOUSE_PORT="${V2_PORT}"
+          [ -n "${V2_USER}" ] && export CLICKHOUSE_USER="${V2_USER}"
+          ingest v2
+        ) || rc=$?
+        exit "${rc}"

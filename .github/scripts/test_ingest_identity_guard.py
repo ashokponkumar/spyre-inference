@@ -146,7 +146,7 @@ def _flat():
     }
 
 
-def _run_ingest(vllm_mod, monkeypatch, goldens):
+def _run_ingest(vllm_mod, monkeypatch, goldens, schema="both"):
     client = _Client()
     monkeypatch.setattr(vllm_mod, "IDENTITY_GOLDENS", goldens)
     monkeypatch.setattr(
@@ -160,7 +160,7 @@ def _run_ingest(vllm_mod, monkeypatch, goldens):
         CLICKHOUSE_DB_V2="spyre_v2",
     ).items():
         monkeypatch.setitem(os.environ, k, v)
-    vllm_mod.insert_to_clickhouse([_flat()], "dab2a67f-14bf-53be-b6e4-fc9642086e47")
+    vllm_mod.insert_to_clickhouse([_flat()], "dab2a67f-14bf-53be-b6e4-fc9642086e47", schema=schema)
     return {db for db, _t in client.sent}
 
 
@@ -175,3 +175,10 @@ def test_drift_takes_out_v2_and_leaves_the_flat_tables(vllm_mod, monkeypatch):
     written = _run_ingest(vllm_mod, monkeypatch, broken)
     assert "spyre_v2" not in written
     assert None in written, "results_v3 / run_metadata must still be written"
+
+
+def test_each_generation_can_be_written_alone(vllm_mod, monkeypatch):
+    # v2 on its own connection runs as its own ingest; neither half may leak into the other.
+    goldens = vllm_mod.IDENTITY_GOLDENS
+    assert _run_ingest(vllm_mod, monkeypatch, goldens, "v1") == {None}
+    assert None not in _run_ingest(vllm_mod, monkeypatch, goldens, "v2")

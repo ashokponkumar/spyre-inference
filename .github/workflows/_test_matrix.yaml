@@ -151,6 +151,17 @@ on:
         required: false
       CLICKHOUSE_DB_V2:
         required: false
+      # v2's own connection; empty falls back to the shared set above.
+      CLICKHOUSE_V2_HOST:
+        required: false
+      CLICKHOUSE_V2_PORT:
+        required: false
+      CLICKHOUSE_V2_USER:
+        required: false
+      CLICKHOUSE_V2_PASS:
+        required: false
+      CLICKHOUSE_V2_DB:
+        required: false
       # Public-model cache steps only; empty on fork PRs (anonymous download).
       HF_TOKEN:
         required: false
@@ -1232,3 +1243,8 @@ jobs:
           clickhouse-pass: ${{ secrets.CLICKHOUSE_PASS }}
           clickhouse-db: ${{ secrets.CLICKHOUSE_DB }}
           clickhouse-db-v2: ${{ secrets.CLICKHOUSE_DB_V2 }}
+          clickhouse-v2-host: ${{ secrets.CLICKHOUSE_V2_HOST }}
+          clickhouse-v2-port: ${{ secrets.CLICKHOUSE_V2_PORT }}
+          clickhouse-v2-user: ${{ secrets.CLICKHOUSE_V2_USER }}
+          clickhouse-v2-pass: ${{ secrets.CLICKHOUSE_V2_PASS }}
+          clickhouse-v2-db: ${{ secrets.CLICKHOUSE_V2_DB }}
