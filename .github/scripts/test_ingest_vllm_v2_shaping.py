@@ -421,6 +421,16 @@ def test_leg_writes_its_artifact_and_a_performance_verdict(mod, monkeypatch):
     )
 
 
+def test_a_refused_record_skips_the_link_not_the_ingest(mod, monkeypatch, caplog):
+    def refuse(*_a, **_k):
+        raise ValueError("gha record: its inputs hash to another id")
+
+    monkeypatch.setattr(mod, "ensure", refuse)
+    with caplog.at_level("WARNING"):
+        assert _artifact_write(mod, [_flat()], monkeypatch) == {}
+    assert "benchmark rows unaffected" in caplog.text
+
+
 def test_no_base_id_means_no_link(mod, monkeypatch):
     assert _artifact_write(mod, [_flat()], monkeypatch, base="") == {}
 
