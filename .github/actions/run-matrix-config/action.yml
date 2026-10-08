@@ -242,7 +242,7 @@ runs:
         # Tee the test output to PID 1's stdout so the Cloud Logs fluent-bit DaemonSet
         # (which only reads pod stdout via /var/log/containers) captures it; a plain run:
         # step's output is intercepted by the runner agent and never reaches pod stdout.
-        # pipefail keeps the make exit code; the guard falls back to file-only in local dev.
+        # pipefail preserves test failures; without writable PID 1 stdout, use ordinary step output.
         set -o pipefail
         if [[ -w /proc/1/fd/1 ]]; then
           timeout --signal=TERM --kill-after=1m 90m \
@@ -276,8 +276,8 @@ runs:
 
     # The arch this leg ran on, for the workflow_run ingest: it is pinned to x86_64, so it
     # cannot read the test host's arch, and arch is hashed into run_id -- a wrong value mints
-    # an id that joins to nothing. Rides beside the XML rather than as a case tag, which
-    # would fold arch into test_case_id and split one test per platform.
+    # an id that joins to nothing. The sidecar supplies the ingest's leg arch;
+    # platform__ case tags carry run context and are excluded from test_case_id.
     - name: Record leg arch for the ingest
       if: always()
       shell: bash

@@ -217,7 +217,7 @@ def test_apply_invokes_patch():
 @pytest.mark.blip2
 @pytest.mark.parametrize("bsz", [1, 2])
 def test_patched_forward_output_matches_cpu_on_spyre(tp_group, bsz):
-    """The patched forward on-card must equal the same forward on CPU."""
+    """The patched forward on Spyre must match the stock forward on CPU."""
     if not spyre_available():
         pytest.skip("Spyre device not available")
 
@@ -244,7 +244,7 @@ def test_patched_forward_output_matches_cpu_on_spyre(tp_group, bsz):
 @pytest.mark.blip2
 @pytest.mark.parametrize("bsz", [1, 2])
 def test_patched_forward_cross_attention_output_matches_cpu_on_spyre(tp_group, bsz):
-    """The patched cross-attention forward on-card must equal the same forward on CPU."""
+    """Patched cross-attention on Spyre must match the stock forward on CPU."""
     if not spyre_available():
         pytest.skip("Spyre device not available")
 
