@@ -20,6 +20,7 @@ Expects the following environment variables:
   CLICKHOUSE_PASS, CLICKHOUSE_DB
 """
 
+import datetime
 import glob
 import hashlib
 import json
@@ -130,6 +131,12 @@ def parse_args() -> Any:
         type=str,
         default=os.environ.get("GITHUB_REPOSITORY", ""),
         help="owner/name, for the run url and the artifact's sources.",
+    )
+    parser.add_argument(
+        "--ci-event",
+        type=str,
+        default=os.environ.get("GITHUB_EVENT_NAME", ""),
+        help="The GHA event that built the leg's artifact; tagged as the library's ci_tags spells.",
     )
     parser.add_argument(
         "--dry-run",
@@ -494,6 +501,19 @@ def resolve_v2_run_id(args) -> str:
     return run_id_of("gha", gha, args.arch, getattr(args, "test_type", "perf"))
 
 
+def _ci_tags(leg) -> list:
+    """The main/pr/nightly tags of the leg's artifact; none from a library that predates them."""
+    try:
+        from spyre_clickhouse_ingest import ci_tags
+    except ImportError:
+        return []
+    day = datetime.datetime.now(datetime.UTC).date()
+    return ci_tags(
+        getattr(leg, "ci_event", ""), leg.repository, leg.branch, leg.sha,
+        getattr(leg, "pr_number", ""), day=day,
+    )  # fmt: skip
+
+
 def _write_artifact_results(client, db: str, rows, run_id_value: str, leg) -> None:
     """This leg's artifacts row and its performance verdict in artifact_results.
 
@@ -522,6 +542,8 @@ def _write_artifact_results(client, db: str, rows, run_id_value: str, leg) -> No
             component=BENCH_COMPONENT,
             run_url=run_url,
             sources=[(repo, leg.branch, leg.sha)],
+            tags=_ci_tags(leg),
+            tag_props={"source": "gha"},
         )
         wrote = insert_artifact_result(
             client,
