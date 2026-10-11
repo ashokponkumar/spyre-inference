@@ -189,9 +189,10 @@ jobs:
           mkdir -p xml_artifacts
           export ARTIFACTS='${{ steps.list-artifacts.outputs.artifacts }}'
           python3 <<'PYEOF'
-          import json, os, subprocess, sys
+          import json, os, shutil, subprocess, sys, time
           from pathlib import Path
 
+          ATTEMPTS = 4
           # Only the JUnit reports and the id sidecars are read below. Skipping the rest
           # (coverage, durations, failed-suite) keeps one broken download from failing the ingest.
           ID_ARTIFACTS = {"run-id", "artifact-id"}
@@ -200,26 +201,44 @@ jobs:
               if a['name'].startswith("junit-") or a['name'] in ID_ARTIFACTS
           ]
           repo  = os.environ['GITHUB_REPOSITORY']
+
+          def fetch(a, zip_path, dest):
+              """Download and unzip one artifact; retried whole, since a truncated zip only fails at unzip."""
+              for attempt in range(1, ATTEMPTS + 1):
+                  shutil.rmtree(dest, ignore_errors=True)
+                  for cmd in (
+                      ["gh", "api", f"/repos/{repo}/actions/artifacts/{a['id']}/zip"],
+                      ["unzip", "-q", "-o", str(zip_path), "-d", str(dest)],
+                  ):
+                      result = subprocess.run(cmd, capture_output=True)
+                      if result.returncode != 0:
+                          err = (result.stderr or result.stdout[-500:]).decode(errors="replace").strip()
+                          print(f"[retry] {a['name']}: {cmd[0]} attempt {attempt}/{ATTEMPTS} "
+                                f"exited {result.returncode}: {err}")
+                          break
+                      if cmd[0] == "gh":
+                          zip_path.write_bytes(result.stdout)
+                  else:
+                      return True
+                  if attempt < ATTEMPTS:
+                      time.sleep(2 ** attempt)
+              shutil.rmtree(dest, ignore_errors=True)
+              return False
+
+          failed = []
           for a in artifacts:
               print(f"Downloading: {a['name']} (id={a['id']})")
-              with open(f"xml_artifacts/{a['name']}.zip", "wb") as f:
-                result = subprocess.run([
-                    "gh", "api",
-                    f"/repos/{repo}/actions/artifacts/{a['id']}/zip",
-                ], check=True, env={**os.environ}, capture_output=True)
-                f.write(result.stdout)
-              # Each artifact unzips into its OWN subdirectory (named after
-              # the artifact) rather than a shared flat one, so two suites
-              # can never clobber each other even if they happen to produce
-              # a JUnit XML with the same basename. ingest_xml_si.py globs
-              # --xml-dir recursively and derives a unique filename from the
-              # path relative to it, so this nesting is exactly what it
-              # expects.
+              # Per-artifact subdirectory so same-basename JUnit XMLs never clobber each other;
+              # ingest_xml_si.py globs --xml-dir recursively, keyed on the relative path.
               dest = Path("xml_artifacts") / a["name"]
-              subprocess.run(
-                  ["unzip", "-o", f"xml_artifacts/{a['name']}.zip", "-d", str(dest)],
-                  check=True,
-              )
+              if not fetch(a, Path("xml_artifacts") / f"{a['name']}.zip", dest):
+                  print(f"::warning::Skipping artifact {a['name']} (id={a['id']}): "
+                        f"download/unzip failed {ATTEMPTS} times; its results are not ingested.")
+                  failed.append(a["name"])
+          print(f"Fetched {len(artifacts) - len(failed)}/{len(artifacts)} artifact(s).")
+          if artifacts and len(failed) == len(artifacts):
+              print("::error::No artifact could be downloaded.")
+              sys.exit(1)
           PYEOF
           echo "Downloaded XML files:"
           find xml_artifacts -name "*.xml" 2>/dev/null || echo "(none)"
