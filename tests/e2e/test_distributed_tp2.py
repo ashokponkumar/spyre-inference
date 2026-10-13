@@ -21,6 +21,7 @@ import os
 
 import pytest
 from spyre_testing_plugin.pytest_plugin import spyre_device_count
+from spyre_testing_plugin.tags import serving_capability
 from spyre_testing_plugin.vfio_reaper import wait_until_card_free
 
 from spyre_inference.models.gemma4 import GEMMA4_TEXT_BACKBONE_OVERRIDE
@@ -111,9 +112,11 @@ def _assert_matches_tp1(tp1: list[list[int]], tp2: list[list[int]]) -> None:
     spyre_device_count() < 2,
     reason="needs >=2 Spyre cards; skipping TP=2 distributed test",
 )
-def test_tp2_llm_generate_matches_tp1() -> None:
+def test_tp2_llm_generate_matches_tp1(record_property) -> None:
     """TP=1 vs TP=2 greedy-decode prefix match, eager."""
     model = "ibm-ai-platform/micro-g3.3-8b-instruct-1b"
+    for prop in serving_capability(model, "served", 2, 128, 2, task="generate", enforce_eager=True):
+        record_property(*prop)
     _assert_matches_tp1(
         _generate(model, tp=1, enforce_eager=True),
         _generate(model, tp=2, enforce_eager=True),
@@ -137,13 +140,17 @@ def test_tp2_llm_generate_matches_tp1() -> None:
     ],
     ids=["micro-g3.3", "gemma-4-26B-A4B-text"],
 )
-def test_tp2_compiled_llm_generate_matches_tp1(model: str, hf_overrides) -> None:
+def test_tp2_compiled_llm_generate_matches_tp1(model: str, hf_overrides, record_property) -> None:
     """TP=1 vs TP=2 greedy-decode prefix match, compiled: the in-graph reduction.
 
     compile_sizes is pinned to the reachable token counts: 1 (one sequence
     decoding alone), 2 (both decoding), and 16 as the prefill/scheduler cap.
     """
     _cc = {"compile_sizes": [1, 2, 16]}
+    for prop in serving_capability(
+        model, "served", 2, 128, 2, task="generate", enforce_eager=False
+    ):
+        record_property(*prop)
     _assert_matches_tp1(
         _generate(
             model, tp=1, enforce_eager=False, compilation_config=_cc, hf_overrides=hf_overrides
