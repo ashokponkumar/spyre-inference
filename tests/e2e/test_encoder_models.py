@@ -19,6 +19,7 @@ Regenerate: ``generate_encoder_embed_refs.py``, ``generate_rerank_score_refs.py`
 
 from __future__ import annotations
 
+import functools
 import importlib.util
 import json
 import math
@@ -29,9 +30,11 @@ from types import ModuleType
 import pytest
 import torch
 import torch.nn.functional as F
-from spyre_testing_plugin.tags import serving_capability
+from spyre_testing_plugin.tags import record_serving_capability
 from vllm import LLM
 from vllm.config import PoolerConfig
+
+MAX_MODEL_LEN = 64
 
 EMBEDDING_MODELS = [
     "ibm-granite/granite-embedding-125m-english",
@@ -169,17 +172,24 @@ def _assert_embeddings_match_refs(model: str, enforce_eager: bool, record_proper
         pytest.skip(f"No HF ref for {model}; run tests/data/generate_encoder_embed_refs.py")
 
     prompts = ref["prompts"]
-    for prop in serving_capability(
-        model, "served", 1, 64, 1, task="embed", enforce_eager=enforce_eager
-    ):
-        record_property(*prop)
+    max_num_seqs = 1
+    record_serving_capability(
+        record_property,
+        model,
+        "served",
+        1,
+        MAX_MODEL_LEN,
+        max_num_seqs,
+        task="embed",
+        enforce_eager=enforce_eager,
+    )
     llm = LLM(
         model=model,
         revision=ref["revision"],
         tokenizer_revision=ref["revision"],
         runner="pooling",
-        max_model_len=64,
-        max_num_seqs=1,
+        max_model_len=MAX_MODEL_LEN,
+        max_num_seqs=max_num_seqs,
         enforce_eager=enforce_eager,
     )
     outputs = llm.embed(prompts)
@@ -210,15 +220,24 @@ def test_encoder_embed_mean_multi_seq(model: str, record_property) -> None:
         pytest.skip(f"No HF ref for {model}; run tests/data/generate_encoder_embed_refs.py")
 
     prompts = ref["prompts"]
-    for prop in serving_capability(model, "served", 1, 64, 2, task="embed", enforce_eager=True):
-        record_property(*prop)
+    max_num_seqs = 2
+    record_serving_capability(
+        record_property,
+        model,
+        "served",
+        1,
+        MAX_MODEL_LEN,
+        max_num_seqs,
+        task="embed",
+        enforce_eager=True,
+    )
     llm = LLM(
         model=model,
         revision=ref["revision"],
         tokenizer_revision=ref["revision"],
         runner="pooling",
-        max_model_len=64,
-        max_num_seqs=2,
+        max_model_len=MAX_MODEL_LEN,
+        max_num_seqs=max_num_seqs,
         enforce_eager=True,
     )
     outputs = llm.embed(prompts)
@@ -261,7 +280,7 @@ def test_encoder_embed_last_pooling() -> None:
         revision=revision,
         tokenizer_revision=revision,
         runner="pooling",
-        max_model_len=64,
+        max_model_len=MAX_MODEL_LEN,
         max_num_seqs=1,
         enforce_eager=True,
         pooler_config=PoolerConfig(seq_pooling_type="LAST"),
@@ -305,17 +324,24 @@ def _assert_rerank_scores_match_refs(model: str, enforce_eager: bool, record_pro
 
     documents = ref["documents"]
     ref_scores = ref["scores"]
-    for prop in serving_capability(
-        model, "served", 1, 64, 1, task="score", enforce_eager=enforce_eager
-    ):
-        record_property(*prop)
+    max_num_seqs = 1
+    record_serving_capability(
+        record_property,
+        model,
+        "served",
+        1,
+        MAX_MODEL_LEN,
+        max_num_seqs,
+        task="score",
+        enforce_eager=enforce_eager,
+    )
     llm = LLM(
         model=model,
         revision=ref["revision"],
         tokenizer_revision=ref["revision"],
         runner="pooling",
-        max_model_len=64,
-        max_num_seqs=1,
+        max_model_len=MAX_MODEL_LEN,
+        max_num_seqs=max_num_seqs,
         enforce_eager=enforce_eager,
     )
     outputs = llm.score(ref["query"], documents)
@@ -340,20 +366,30 @@ def test_encoder_rerank_default_max_model_len_compiled(record_property) -> None:
     for count in token_counts:
         assert 512 < count <= 1024, f"pair of {count} tokens no longer pads to L=1024"
 
-    llm = LLM(
-        model=LONG_RERANK_MODEL,
-        revision=revision,
-        tokenizer_revision=revision,
-        runner="pooling",
+    # vLLM resolves max_model_len and max_num_seqs here, so a failed build records `default`.
+    record = functools.partial(
+        record_serving_capability,
+        record_property,
+        LONG_RERANK_MODEL,
+        "served",
+        1,
+        task="score",
         enforce_eager=False,
     )
+    try:
+        llm = LLM(
+            model=LONG_RERANK_MODEL,
+            revision=revision,
+            tokenizer_revision=revision,
+            runner="pooling",
+            enforce_eager=False,
+        )
+    except BaseException:
+        record("default", "default")
+        raise
+    config = llm.llm_engine.vllm_config
+    record(config.model_config.max_model_len, config.scheduler_config.max_num_seqs)
     assert llm.llm_engine.model_config.max_model_len == 2048
-    # Recorded once built: the config is vLLM's default, known only from the engine.
-    seqs = llm.llm_engine.vllm_config.scheduler_config.max_num_seqs
-    for prop in serving_capability(
-        LONG_RERANK_MODEL, "served", 1, 2048, seqs, task="score", enforce_eager=False
-    ):
-        record_property(*prop)
     outputs = llm.score(LONG_RERANK_QUERY, LONG_RERANK_DOCUMENTS)
     assert len(outputs) == len(LONG_RERANK_DOCUMENTS)
     _assert_scores_match(
@@ -403,7 +439,7 @@ def test_encoder_token_classify() -> None:
     llm = LLM(
         model=TOKEN_CLASSIFY_MODEL,
         runner="pooling",
-        max_model_len=64,
+        max_model_len=MAX_MODEL_LEN,
         max_num_seqs=2,
         enforce_eager=True,
     )

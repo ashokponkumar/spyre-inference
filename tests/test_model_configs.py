@@ -15,7 +15,7 @@
 """Tests for the Spyre model registry (model_configs.yaml + Python loader)."""
 
 import pytest
-from spyre_testing_plugin.tags import serving_capability
+from spyre_testing_plugin.tags import record_serving_capability
 
 from spyre_inference.config import (
     DeviceConfig,
@@ -88,16 +88,15 @@ _DECLARED = [
 )
 def test_declared_serving_config(model_id, cfg, platforms, record_property):
     """Each registry serving config, as a declared `model_serving` capability."""
-    for prop in serving_capability(
+    record_serving_capability(
+        record_property,
         model_id,
         "declared",
         cfg.tp_size,
         cfg.max_model_len,
         cfg.max_num_seqs,
         platforms=",".join(platforms or []),
-    ):
-        record_property(*prop)
-    assert cfg.tp_size >= 1 and cfg.max_model_len > 0 and cfg.max_num_seqs > 0
+    )
 
 
 def test_config_positive_fields():

@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from spyre_testing_plugin.tags import serving_capability
+from spyre_testing_plugin.tags import record_serving_capability
 from vllm import LLM, RequestOutput, SamplingParams
 
 pytestmark = [pytest.mark.model_quality, pytest.mark.uses_subprocess]
@@ -103,10 +103,16 @@ def test_decoder_model_output(
 
     _assert_prompts_fit_prefill_bucket(model, revision, prompts)
 
-    for prop in serving_capability(
-        model, "served", 1, MAX_MODEL_LEN, MAX_NUM_SEQS, task="generate"
-    ):
-        record_property(*prop)
+    record_serving_capability(
+        record_property,
+        model,
+        "served",
+        1,
+        MAX_MODEL_LEN,
+        MAX_NUM_SEQS,
+        task="generate",
+        enforce_eager=False,
+    )
     engine = LLM(
         model=model,
         revision=revision,
@@ -158,10 +164,16 @@ def test_fp8_decoder_model_smoke(
 
     _assert_prompts_fit_prefill_bucket(model, revision, prompts)
 
-    for prop in serving_capability(
-        model, "served", 1, MAX_MODEL_LEN, MAX_NUM_SEQS, task="generate"
-    ):
-        record_property(*prop)
+    record_serving_capability(
+        record_property,
+        model,
+        "served",
+        1,
+        MAX_MODEL_LEN,
+        MAX_NUM_SEQS,
+        task="generate",
+        enforce_eager=False,
+    )
     engine = LLM(
         model=model,
         revision=revision,
