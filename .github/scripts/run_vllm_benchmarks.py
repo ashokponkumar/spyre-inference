@@ -467,66 +467,65 @@ def run_serve_benchmark(
             stderr=server_lf,
             start_new_session=True,
         )
+        try:
+            # Timed from before the spawn: for large models this is mostly the
+            # one-time warmup compile, which is worth comparing run to run.
+            health_url = f"http://{host}:{port}/health"
+            server_startup_sec = None
+            deadline = server_start_ts + health_timeout
+            while time.monotonic() < deadline:
+                if server_proc.poll() is not None:
+                    log.error("Server process died with exit code %d", server_proc.returncode)
+                    if server_log.exists():
+                        log.error("Server log:\n%s", server_log.read_text())
+                    return False
+                try:
+                    urllib.request.urlopen(health_url, timeout=2)
+                    server_startup_sec = round(time.monotonic() - server_start_ts, 1)
+                    log.info("Server ready after %.1fs", server_startup_sec)
+                    break
+                except Exception:
+                    time.sleep(1)
 
-        # Timed from before the spawn: for large models this is mostly the
-        # one-time warmup compile, which is worth comparing run to run.
-        health_url = f"http://{host}:{port}/health"
-        server_startup_sec = None
-        deadline = server_start_ts + health_timeout
-        while time.monotonic() < deadline:
-            if server_proc.poll() is not None:
-                log.error("Server process died with exit code %d", server_proc.returncode)
+            if server_startup_sec is None:
+                log.error("Server did not become healthy within %ds", health_timeout)
                 if server_log.exists():
                     log.error("Server log:\n%s", server_log.read_text())
                 return False
-            try:
-                urllib.request.urlopen(health_url, timeout=2)
-                server_startup_sec = round(time.monotonic() - server_start_ts, 1)
-                log.info("Server ready after %.1fs", server_startup_sec)
-                break
-            except Exception:
-                time.sleep(1)
 
-        if server_startup_sec is None:
-            log.error("Server did not become healthy within %ds", health_timeout)
-            if server_log.exists():
-                log.error("Server log:\n%s", server_log.read_text())
-            _kill_server(server_proc)
-            return False
-
-        # Run bench serve
-        bench_cmd = [*VLLM_CLI, "bench", "serve"]
-        bench_cmd.extend(build_command_args(bench_parameters))
-        bench_cmd.extend(
-            [
-                # The trace prompts already carry their chat template;
-                # re-applying it would change token counts and the
-                # prefix-cache hit rate.
-                "--skip-chat-template",
-                "--save-result",
-                "--result-dir",
-                str(results_dir),
-                "--result-filename",
-                f"{test_name}.json",
-            ]
-        )
-
-        bench_cmd_line = record_command(
-            bench_cmd, config_env, results_dir / f"{test_name}_bench.cmd"
-        )
-
-        log.info("=== Running serve benchmark: %s ===", test_name)
-        log.info("Bench command: %s", bench_cmd_line)
-
-        bench_log = results_dir / f"{test_name}_bench.log"
-        with open(bench_log, "w") as blf:
-            blf.write(f"# {bench_cmd_line}\n")
-            blf.flush()
-            result = subprocess.run(
-                bench_cmd, env=env, stdout=blf, stderr=subprocess.PIPE, text=True
+            # Run bench serve
+            bench_cmd = [*VLLM_CLI, "bench", "serve"]
+            bench_cmd.extend(build_command_args(bench_parameters))
+            bench_cmd.extend(
+                [
+                    # The trace prompts already carry their chat template;
+                    # re-applying it would change token counts and the
+                    # prefix-cache hit rate.
+                    "--skip-chat-template",
+                    "--save-result",
+                    "--result-dir",
+                    str(results_dir),
+                    "--result-filename",
+                    f"{test_name}.json",
+                ]
             )
 
-        _kill_server(server_proc)
+            bench_cmd_line = record_command(
+                bench_cmd, config_env, results_dir / f"{test_name}_bench.cmd"
+            )
+
+            log.info("=== Running serve benchmark: %s ===", test_name)
+            log.info("Bench command: %s", bench_cmd_line)
+
+            bench_log = results_dir / f"{test_name}_bench.log"
+            with open(bench_log, "w") as blf:
+                blf.write(f"# {bench_cmd_line}\n")
+                blf.flush()
+                result = subprocess.run(
+                    bench_cmd, env=env, stdout=blf, stderr=subprocess.PIPE, text=True
+                )
+        finally:
+            _kill_server(server_proc)
 
     if result.returncode != 0:
         log.error("Serve test %s failed with exit code %d", test_name, result.returncode)
@@ -611,6 +610,10 @@ def _suite_config_files(configs_dir: Path, suite: str, bench_types: set[str]) ->
 
 
 def main():
+    # Turn SIGTERM into SystemExit so the running server's process group, started in its
+    # own session, is still killed.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(128 + signal.SIGTERM))
+
     # s390x: the protobuf upb C runtime SIGSEGVs (upb_DefPool_Free) in vLLM's
     # model-inspection child; force pure-Python protobuf. Set on os.environ so
     # the child, spawned by vLLM not us, inherits it.

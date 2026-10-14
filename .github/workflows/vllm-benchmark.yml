@@ -1,8 +1,6 @@
 name: vLLM Benchmark
 
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main, 'release-*']
     types: [opened, synchronize, reopened, labeled]
@@ -45,8 +43,7 @@ on:
       clickhouse_env:
         description: >
           ClickHouse instance to ingest into: "prod" (the CLICKHOUSE_* secret
-          set) or "dev" (the CLICKHOUSE_*_DEV set). A push to main always uses
-          prod; this input only applies to a manual dispatch.
+          set) or "dev" (the CLICKHOUSE_*_DEV set).
         required: false
         type: choice
         options: [prod, dev]
@@ -205,16 +202,14 @@ jobs:
 
       # !cancelled(): a later benchmark failing must not discard the ones that completed.
       - name: Install ClickHouse ingest dependencies
-        if: ${{ !cancelled() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
+        if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' }}
         run: |
           set -eux
           uv pip install -r .github/scripts/requirements-benchmark.txt
 
       - name: Ingest benchmark results into ClickHouse
-        if: ${{ !cancelled() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
+        if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' }}
         env:
-          # A push to main has no clickhouse_env input, so the selector resolves
-          # to prod. A manual dispatch can pick dev with the *_DEV secret set.
           CLICKHOUSE_HOST: ${{ inputs.clickhouse_env != 'dev' && secrets.CLICKHOUSE_HOST || secrets.CLICKHOUSE_HOST_DEV }}
           CLICKHOUSE_PORT: ${{ inputs.clickhouse_env != 'dev' && secrets.CLICKHOUSE_PORT || secrets.CLICKHOUSE_PORT_DEV }}
           CLICKHOUSE_USER: ${{ inputs.clickhouse_env != 'dev' && secrets.CLICKHOUSE_USER || secrets.CLICKHOUSE_USER_DEV }}
